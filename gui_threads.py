@@ -1,8 +1,5 @@
 # ----- Imports -------------------------------------------------------
 # Standard imports
-import random
-import numpy as np
-import time
 
 # PyQT imports
 from PyQt5.QtCore import QDateTime, Qt, QTimer, QThread, pyqtSignal
@@ -13,12 +10,10 @@ from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QDateTimeEdit,
         QVBoxLayout, QWidget, QFileDialog)
 from PyQt5.QtGui import QPainter, QColor, QFont
 import pyqtgraph as pg
-import pyqtgraph.opengl as gl
 
 # Local Imports
-from gui_parser import uartParser
-from gui_common import *
-from graphUtilities import *
+from library.gui_common import *
+from library.graphUtilities import *
 
 
 class parseUartThread(QThread):
