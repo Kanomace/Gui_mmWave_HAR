@@ -68,19 +68,18 @@ class uartParser:
             },
             'BGNOISE_FILTER_CFG': {
                 'BGN_enable': True,
-                'BGN_deque_length': 150,
+                'BGN_deque_length': 50,  # ⚠️ 降低帧数要求，加快测试
                 'BGN_accept_SNR_threshold': (None, 200),
-                # the noise with this SNR range will be accepted when BGN update, it is for DBS noise
                 'BGN_filter_SNR_threshold': (None, 200),
-                # the noise with this SNR range will be filtered when BGN filter
-                'BGN_DBS_window_step': 20,
-                'BGN_DBS_eps': 0.02,
-                'BGN_DBS_min_samples': 20,
-                'BGN_cluster_tf': 0.15,  # the threshold factor of data number used to select cluster
+                'BGN_DBS_window_step': 50,  # 更频繁更新
+                'BGN_DBS_eps': 0.06,  # ⚠️ 扩大聚类半径
+                'BGN_DBS_min_samples': 5,  # ⚠️ 降低簇形成要求
+                'BGN_cluster_tf': 0.05,  # ⚠️ 降低背景点比例阈值
                 'BGN_cluster_xextension': 0.05,
                 'BGN_cluster_yextension': 0.05,
-                'BGN_cluster_zextension': 0.01,
+                'BGN_cluster_zextension': 0.05,  # ⚠️ 提高z方向容忍度
             }
+
         }
         self.dbscan = DBSCANGenerator(**cfg)
         self.bgn = BGNoiseFilter(**cfg)  # ✅ 初始化背景噪声滤波器
@@ -164,10 +163,15 @@ class uartParser:
                 all_points = pd.concat(self.pointCloudCache, ignore_index=True)
                 data_np = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
 
-                # ✅ Step1: 背景噪声滤波
-                print(f"[BGN] 输入点数: {data_np.shape[0]}")
+                # ✅ Step 1: 更新背景模型（学习阶段）
+                self.bgn.BGN_update(data_np)
+                print(f"[BGN] 当前背景簇数量: {len(self.bgn.BGN_cluster_boundary)}")
+                print(f"[BGN] 队列缓存帧数: {len(self.bgn.BGN_deque)}/{self.bgn.BGN_deque.maxlen}")
+
+                # ✅ Step 2: 滤波（当模型已建立时才会生效）
                 filtered_data = self.bgn.BGN_filter(data_np)
-                print(f"[BGN] 滤波后点数: {filtered_data.shape[0]}")
+
+                print(f"[BGN] 输入点数: {data_np.shape[0]}, 滤波后点数: {filtered_data.shape[0]}")
 
                 filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
 
