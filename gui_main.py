@@ -718,20 +718,29 @@ class App(tk.Tk):
         except Exception as e:
             self._log(f"[PointCloud] 更新失败: {e}")
 
-    def _on_new_pointcloud(self, file_path):
-        """当有新的 .xlsx 点云文件保存时，实时加载显示"""
+    def _on_new_pointcloud(self, payload):
+        """当有新的点云文件保存时（带聚类信息）"""
         try:
-            df = pd.read_excel(file_path)
-            if not {'X', 'Y', 'Z', 'SNR'}.issubset(df.columns):
-                self._log(f"[PointCloud] 无效文件列: {file_path}")
+            if isinstance(payload, tuple):
+                file_path, cluster_path = payload
+            else:
+                file_path, cluster_path = payload, None
+
+            if not os.path.isfile(file_path):
+                self._log(f"[PointCloud] 文件不存在: {file_path}")
                 return
 
-            # 在主线程中更新
-            self.after(0, lambda: self._update_pointcloud(df, file_path))
+            df = pd.read_excel(file_path)
+            if not {'X', 'Y', 'Z'}.issubset(df.columns):
+                self._log(f"[PointCloud] 缺少坐标列: {file_path}")
+                return
+
+            self.after(0, lambda: self._update_pointcloud(df, file_path, cluster_path))
+
         except Exception as e:
             self._log(f"[PointCloud] 加载失败: {e}")
 
-    def _update_pointcloud(self, df, file_path):
+    def _update_pointcloud(self, df, file_path, cluster_path=None):
         try:
             self.ax.clear()
 
@@ -744,19 +753,51 @@ class App(tk.Tk):
             # 绘制点云
             self.ax.scatter(df['X'], df['Y'], df['Z'], c=norm_snr, cmap='jet', s=8)
 
-            # 固定坐标范围为 ±2m（4m × 4m × 4m）
+            # 固定坐标范围为 ±2m
             self.ax.set_xlim(-4, 4)
             self.ax.set_ylim(0, 8)
             self.ax.set_zlim(-4, 4)
-            self.ax.set_box_aspect([1, 1, 1])  # 保持立方比例
+            self.ax.set_box_aspect([1, 1, 1])
 
-            # 设置坐标轴与标题
             self.ax.set_xlabel('X (m)')
             self.ax.set_ylabel('Y (m)')
             self.ax.set_zlabel('Z (m)')
             self.ax.set_title(os.path.basename(file_path))
 
-            # 重绘
+            # ========== 绘制 DBSCAN 聚类框 ==========
+            if cluster_path and os.path.isfile(cluster_path):
+                try:
+                    xl = pd.ExcelFile(cluster_path)
+                    for sheet_name in xl.sheet_names:
+                        if "Cluster" not in sheet_name:
+                            continue
+                        cdf = xl.parse(sheet_name)
+                        if not {'X', 'Y', 'Z'}.issubset(cdf.columns):
+                            continue
+
+                        xmin, xmax = cdf['X'].min(), cdf['X'].max()
+                        ymin, ymax = cdf['Y'].min(), cdf['Y'].max()
+                        zmin, zmax = cdf['Z'].min(), cdf['Z'].max()
+
+                        # 绘制立方框
+                        x = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
+                        y = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
+                        z = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+                        edges = [
+                            (0, 1), (1, 2), (2, 3), (3, 0),
+                            (4, 5), (5, 6), (6, 7), (7, 4),
+                            (0, 4), (1, 5), (2, 6), (3, 7)
+                        ]
+                        for e0, e1 in edges:
+                            self.ax.plot(
+                                [x[e0], x[e1]],
+                                [y[e0], y[e1]],
+                                [z[e0], z[e1]],
+                                color='red', linewidth=1.2
+                            )
+                except Exception as e:
+                    self._log(f"[ClusterDraw] 绘制聚类框失败: {e}")
+
             self.canvas.draw()
 
         except Exception as e:

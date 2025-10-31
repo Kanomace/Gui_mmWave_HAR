@@ -57,11 +57,11 @@ class uartParser():
         cfg = {
             'DBSCAN_GENERATOR_CFG': {
                 'Default': {
-                    'DBS_eps': 0.25,  # 聚类半径
-                    'DBS_min_samples': 5,  # 最小点数
-                    'DBS_cp_pos_xlim': (-2, 2),
-                    'DBS_cp_pos_ylim': (0, 5),
-                    'DBS_cp_pos_zlim': (-1, 2),
+                    'DBS_eps': 0.5,
+                    'DBS_min_samples': 4,
+                    'DBS_cp_pos_xlim': (-3, 3),
+                    'DBS_cp_pos_ylim': (0, 6),
+                    'DBS_cp_pos_zlim': (-2, 2),
                     'DBS_size_xlim': (0, 2),
                     'DBS_size_ylim': (0, 2),
                     'DBS_size_zlim': (0, 2),
@@ -149,9 +149,8 @@ class uartParser():
                 all_points = pd.concat(self.pointCloudCache, ignore_index=True)
                 file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
                 all_points.to_excel(file_xlsx, index=False)
-                notify_new_pointcloud(file_xlsx)
-
                 # ====== 🧩 DBSCAN 聚类并保存 ======
+                cluster_path = None
                 if self.cluster_dir:
                     try:
                         data = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
@@ -161,13 +160,16 @@ class uartParser():
                         with pd.ExcelWriter(cluster_path) as writer:
                             for i, cluster in enumerate(valid_points_list):
                                 df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                df_cluster.to_excel(writer, sheet_name=f'Cluster_{i+1}', index=False)
+                                df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
                             if len(noise) > 0:
                                 df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
                                 df_noise.to_excel(writer, sheet_name='Noise', index=False)
                         print(f"✅ Cluster saved: {cluster_path}")
                     except Exception as e:
                         print(f"[DBSCAN ERROR] {e}")
+
+                # ✅ 通知 GUI，同时传递 cluster 路径
+                notify_new_pointcloud((file_xlsx, cluster_path))
 
         return parseStandardFrame(frameData)
 

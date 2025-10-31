@@ -2,7 +2,7 @@
   "data_root": "D:/Ti/Gui_mmWave_HAR/data_realtime",
   "ckpt_path": "D:/Ti/Gui_mmWave_HAR/model_checkpoint/checkpoint0914.pth",
   "rope_dir": "D:/Ti/Gui_mmWave_HAR/rope_informer",
-  "cfg_file": "D:/Ti/Gui_mmWave_HAR/xwr68xx_profile_2025_08_29T05_34_54_592.cfg",
+  "cfg_file": "D:/Ti/Gui_mmWave_HAR/xwr68xx_profile_2025_10_31.cfg",
   "radar_enable": true,
   "radar_device": "IWR6843",
   "cli_com": "COM6",
