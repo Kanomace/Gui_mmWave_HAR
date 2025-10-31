@@ -39,7 +39,7 @@ class BGNoiseFilter:
         """
         inherit father class __init__ para
         """
-        super().__init__(**kwargs_CFG)
+        super().__init__()
 
     # filter the background noise
     def BGN_filter(self, data_points):
