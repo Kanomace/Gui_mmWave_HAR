@@ -1,9 +1,4 @@
 # gui_main.py
-# ------------------------------------------
-# 完整版本：带 DBSCAN 聚类可视化 + 原始功能（串口采集、实时推理、文件监视）
-# - 延迟注册 pointcloud_notifier 回调，避免 AttributeError
-# - 支持 payload(dict) 与 file path (str)
-# ------------------------------------------
 
 import os
 import sys
@@ -19,18 +14,20 @@ import serial.tools.list_ports
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import datetime
-import numpy as np
-import matplotlib
 
-# Use TkAgg backend for embedding in Tkinter
+from pointcloud_notifier import register_callback
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+
+# Matplotlib for 3D point cloud display
+import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+import numpy as np
 
-# Import notifier
-from pointcloud_notifier import register_callback
-
-# Project-specific imports (assumed present)
+# Your existing modules (unchanged)
 from voxelization import monitor_folder as voxel_monitor_folder
 from projection import monitor_voxel_folder as projection_monitor_voxel_folder
 from projection import create_single_projection
@@ -40,18 +37,15 @@ from main import (
     GRID_SIZE, BOUNDARIES, WINDOW_SIZE, SEQ_LEN, BATCH_SIZE,
 )
 
+# Notifier for cross-module callbacks (must exist as file pointcloud_notifier.py)
+from pointcloud_notifier import register_callback  # used in main to register callback
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 
-# ---------------- Utility ----------------
 def list_serial_ports():
     """返回可用串口列表"""
     return [p.device for p in serial.tools.list_ports.comports()]
-
-
-def random_color():
-    """返回随机 RGB 颜色元组"""
-    return tuple(np.random.rand(3))
 
 
 # ----------------- Radar Dumper -----------------
@@ -82,12 +76,11 @@ class RadarToXlsxDumper:
 
     def start(self):
         try:
-            # 延迟导入以避免循环依赖
             from gui_parser import uartParser
 
             self.parser = uartParser(
                 type=self.demo_type,
-                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),
+                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),  # 自动对应 bin 文件夹
                 out_xlsx_dir=self.xlsx_out_dir
             )
             self.parser.setSaveBinary(1)
@@ -448,7 +441,6 @@ class App(tk.Tk):
         self.title("mmWave HAR 实时推理 - 简易UI")
         self.geometry("1200x800")
 
-        # --- state vars ---
         self.data_root = tk.StringVar()
         self.ckpt_path = tk.StringVar()
         self.rope_dir = tk.StringVar()
@@ -462,7 +454,6 @@ class App(tk.Tk):
         # queue 用于跨线程接收 pointcloud_notifier 的通知（线程安全）
         self.pointcloud_queue = queue.Queue()
 
-        # controller 用于启动 pipeline
         self.controller = RealtimePipelineController(
             log_fn=self._log,
             result_fn=self._push_result_row
@@ -472,12 +463,9 @@ class App(tk.Tk):
         self._build_ui()
         # load config
         self._load_config()
-
-        # 延迟注册回调，确保 Tk 完全初始化后再注册
-        self.after(100, lambda: register_callback(self._on_new_pointcloud))
-
         # 定时取出日志显示
         self.after(100, self._drain_log_queue)
+        register_callback(self._on_new_pointcloud)
         # 定时处理点云队列（在主线程绘制）
         self.after(100, self._process_pointcloud_queue)
 
@@ -553,7 +541,10 @@ class App(tk.Tk):
         frm_right = ttk.LabelFrame(frm_main, text="点云显示 (X-Y-Z)")
         frm_right.pack(side="right", fill="both", expand=True, padx=4, pady=4)
 
-        fig = Figure(figsize=(5, 5))
+        # matplotlib 图
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        fig = plt.Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111, projection="3d")
         self.ax.set_xlabel("X (m)")
         self.ax.set_ylabel("Y (m)")
@@ -573,12 +564,9 @@ class App(tk.Tk):
             "cli_com": self.cli_com_var.get(),
             "data_com": self.data_com_var.get()
         }
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
-            self._log("[Config] 保存完成")
-        except Exception as e:
-            self._log(f"[Config] 保存失败: {e}")
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        self._log("[Config] 保存完成")
 
     def _load_config(self):
         if os.path.isfile(CONFIG_PATH):
@@ -611,15 +599,15 @@ class App(tk.Tk):
             self.controller.cli_com = self.cli_com_var.get()
             self.controller.data_com = self.data_com_var.get()
             self.controller.start()
-            self.status_var = "状态: 已启动"
-            self._log("[GUI] Pipeline started")
+            self.status_var.set("状态: 已启动")
         except Exception as e:
             self._log(f"[Error] 启动失败: {e}")
+            self.status_var.set("状态: 启动失败")
 
     def _on_stop(self):
         try:
             self.controller.stop()
-            self._log("[GUI] Pipeline stopped")
+            self.status_var.set("状态: 已停止")
         except Exception as e:
             self._log(f"[Error] 停止失败: {e}")
 
@@ -631,52 +619,35 @@ class App(tk.Tk):
     def _drain_log_queue(self):
         while not self.log_queue.empty():
             msg = self.log_queue.get_nowait()
-            try:
-                self.txt_log.insert("end", msg + "\n")
-                self.txt_log.see("end")
-            except Exception:
-                # If widget not ready, ignore
-                pass
+            self.txt_log.insert("end", msg + "\n")
+            self.txt_log.see("end")
         self.after(100, self._drain_log_queue)
 
     # ---------------- Result ----------------
     def _push_result_row(self, result):
-        try:
-            self.tree.insert("", "end", values=(result["sample_name"], result["pred_label"], f"{result['confidence']:.4f}"))
-        except Exception:
-            pass
+        self.tree.insert("", "end", values=(result["sample_name"], result["pred_label"], f"{result['confidence']:.4f}"))
 
     # ---------------- Pointcloud queue handling ----------------
-    def _on_new_pointcloud(self, data):
+    def _enqueue_pointcloud(self, file_path):
         """
-        回调入口（由 pointcloud_notifier 调用）
-        data: str (file path) 或 dict (聚类 payload)
-        我们只做入队处理，实际绘制在主线程的 _process_pointcloud_queue 中执行
+        This function is safe to be called from other threads (it's registered as callback).
+        It only enqueues the file path for the main thread to process.
         """
         try:
-            self.pointcloud_queue.put(data)
+            self.pointcloud_queue.put(file_path)
         except Exception as e:
+            # put best-effort log
             self._log(f"[PointCloud] enqueue error: {e}")
 
     def _process_pointcloud_queue(self):
         """
-        Called periodically on the main thread to process queued pointcloud file paths or payloads.
+        Called periodically on the main thread to process queued pointcloud file paths.
         """
         try:
             while not self.pointcloud_queue.empty():
-                data = self.pointcloud_queue.get_nowait()
-
-                if isinstance(data, str):
-                    # 原始点云文件路径
-                    self._update_pointcloud_view(data)
-                elif isinstance(data, dict) and data.get("type") == "clustered":
-                    # 聚类 payload
-                    self._draw_clustered_pointcloud(data)
-                else:
-                    # 兼容旧版：如果回调传入的是路径字符串封装的其他类型
-                    if isinstance(data, (bytes, bytearray)):
-                        # 忽略
-                        continue
+                file_path = self.pointcloud_queue.get_nowait()
+                # process and draw
+                self._update_pointcloud_view(file_path)
         except Exception as e:
             self._log(f"[PointCloud] processing error: {e}")
         finally:
@@ -693,7 +664,7 @@ class App(tk.Tk):
                 return
 
             df = pd.read_excel(file_path)
-            # support different case column names
+            # look for common column name variants
             cols = {c.lower(): c for c in df.columns}
             if not all(k in cols for k in ("x", "y", "z")):
                 self._log(f"[PointCloud] 文件缺少 X/Y/Z 列: {file_path}")
@@ -702,6 +673,7 @@ class App(tk.Tk):
             xcol = cols["x"]
             ycol = cols["y"]
             zcol = cols["z"]
+            # snr optional
             snr_col = cols.get("snr", None)
 
             xs = df[xcol].to_numpy(dtype=float)
@@ -711,6 +683,7 @@ class App(tk.Tk):
             # build colors from SNR if present, else use height-based color
             if snr_col:
                 snr = df[snr_col].to_numpy(dtype=float)
+                # normalize 0..1
                 if np.nanmax(snr) - np.nanmin(snr) > 1e-6:
                     norm = (snr - np.nanmin(snr)) / (np.nanmax(snr) - np.nanmin(snr))
                 else:
@@ -718,6 +691,7 @@ class App(tk.Tk):
                 cmap = matplotlib.cm.get_cmap("jet")
                 colors = cmap(norm)
             else:
+                # fallback: color by z
                 if np.nanmax(zs) - np.nanmin(zs) > 1e-6:
                     normz = (zs - np.nanmin(zs)) / (np.nanmax(zs) - np.nanmin(zs))
                 else:
@@ -731,6 +705,7 @@ class App(tk.Tk):
             self.ax.set_ylabel('Y (m)')
             self.ax.set_zlabel('Z (m)')
             self.ax.set_title(os.path.basename(file_path))
+            # optionally adjust limits
             try:
                 margin = 0.5
                 self.ax.set_xlim(np.nanmin(xs)-margin, np.nanmax(xs)+margin)
@@ -743,61 +718,65 @@ class App(tk.Tk):
         except Exception as e:
             self._log(f"[PointCloud] 更新失败: {e}")
 
-    def _draw_clustered_pointcloud(self, payload):
-        """
-        显示聚类后的彩色点云
-        payload: {
-            "type": "clustered",
-            "path": "...",
-            "clusters": [ ndarray-like lists ],
-            "noise": [ ndarray-like lists ]
-        }
-        """
+    def _on_new_pointcloud(self, file_path):
+        """当有新的 .xlsx 点云文件保存时，实时加载显示"""
         try:
-            clusters = payload.get("clusters", [])
-            noise = payload.get("noise", [])
-            cluster_path = payload.get("path", "clustered")
+            df = pd.read_excel(file_path)
+            if not {'X', 'Y', 'Z', 'SNR'}.issubset(df.columns):
+                self._log(f"[PointCloud] 无效文件列: {file_path}")
+                return
 
-            self.ax.cla()
+            # 在主线程中更新
+            self.after(0, lambda: self._update_pointcloud(df, file_path))
+        except Exception as e:
+            self._log(f"[PointCloud] 加载失败: {e}")
 
-            for i, cluster in enumerate(clusters):
-                pts = np.array(cluster)
-                if pts.ndim != 2 or pts.shape[1] < 3:
-                    continue
-                color = random_color()
-                self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=12, color=color, label=f"Cluster {i+1}")
+    def _update_pointcloud(self, df, file_path):
+        try:
+            self.ax.clear()
 
-            if len(noise) > 0:
-                noise_pts = np.array(noise)
-                if noise_pts.ndim == 2 and noise_pts.shape[1] >= 3:
-                    self.ax.scatter(noise_pts[:, 0], noise_pts[:, 1], noise_pts[:, 2], s=6, color="gray", label="Noise")
+            # 计算 SNR 颜色归一化
+            if 'SNR' in df.columns:
+                norm_snr = (df['SNR'] - df['SNR'].min()) / (df['SNR'].max() - df['SNR'].min() + 1e-6)
+            else:
+                norm_snr = np.zeros(len(df))
 
-            # legend might be empty if too many clusters; safe guard
-            try:
-                self.ax.legend(loc="upper right", fontsize=8)
-            except Exception:
-                pass
+            # 绘制点云
+            self.ax.scatter(df['X'], df['Y'], df['Z'], c=norm_snr, cmap='jet', s=8)
 
-            self.ax.set_xlabel("X (m)")
-            self.ax.set_ylabel("Y (m)")
-            self.ax.set_zlabel("Z (m)")
-            self.ax.set_title(f"DBSCAN Clustered - {os.path.basename(cluster_path)}")
-            self.ax.set_box_aspect([1, 1, 1])
+            # 固定坐标范围为 ±2m（4m × 4m × 4m）
+            self.ax.set_xlim(-4, 4)
+            self.ax.set_ylim(0, 8)
+            self.ax.set_zlim(-4, 4)
+            self.ax.set_box_aspect([1, 1, 1])  # 保持立方比例
+
+            # 设置坐标轴与标题
+            self.ax.set_xlabel('X (m)')
+            self.ax.set_ylabel('Y (m)')
+            self.ax.set_zlabel('Z (m)')
+            self.ax.set_title(os.path.basename(file_path))
+
+            # 重绘
             self.canvas.draw()
 
-            self._log(f"[GUI] 显示聚类结果: {os.path.basename(cluster_path)} ({len(clusters)} clusters)")
         except Exception as e:
-            self._log(f"[GUI] 聚类显示失败: {e}")
+            print(f"[PointCloudView] Failed to update: {e}")
 
 
 # ----------------- Main Entrypoint -----------------
 if __name__ == "__main__":
+    # create app
     app = App()
 
-    # 正确注册回调（把 app 的方法注入到 notifier）
+    # register the notifier callback to enqueue pointcloud file paths (thread-safe)
     try:
-        register_callback(app._on_new_pointcloud)
-        app._log("[Notifier] GUI callback registered.")
+        # import here to avoid circular import issues in some environments
+        from pointcloud_notifier import register_callback
+
+        register_callback(self._enqueue_pointcloud)
+        print("[DEBUG] GUI callback registered.")
+        self.after(500, self._process_pointcloud_queue)
+
     except Exception as e:
         app._log(f"[Notifier] 注册失败: {e}")
 
