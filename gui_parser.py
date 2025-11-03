@@ -1,9 +1,9 @@
-# gui_parser_with_bgn.py
+# gui_parser_with_bgn_fixed.py
 # ---------------------------------------------------------------
 # 功能：
 #   1️⃣ 实时接收点云帧并保存为 xlsx
 #   2️⃣ 在 DBSCAN 聚类前使用 BGNoiseFilter 背景噪声过滤
-#   3️⃣ GUI 与保存文件均使用过滤后的点云
+#   3️⃣ 若点云过少或无聚类结果，也保存空sheet防止文件损坏
 # ---------------------------------------------------------------
 
 import os
@@ -17,7 +17,7 @@ import serial
 from pointcloud_notifier import notify_new_pointcloud
 from library.parseFrame import *
 from library.DBSCAN_generator import DBSCANGenerator
-from library.bgnoise_filter import BGNoiseFilter   # ✅ 新增：背景噪声滤波模块
+from library.bgnoise_filter import BGNoiseFilter   # ✅ 背景噪声滤波模块
 
 
 class uartParser:
@@ -51,38 +51,33 @@ class uartParser:
             'DBSCAN_GENERATOR_CFG': {
                 'Default': {
                     'DBS_eps': 0.5,
-                    # maximum distance, larger means the further points can be clustered, smaller means the points need to be closer
                     'DBS_min_samples': 10,
-                    # minimum samples, larger means more points are needed to form a cluster, 1-each point can be treated as a cluster, no noise
-
-                    # DBSCAN filter para
-                    'DBS_cp_pos_xlim': None,  # the position limit in x-direction for central points of clusters
+                    'DBS_cp_pos_xlim': None,
                     'DBS_cp_pos_ylim': None,
                     'DBS_cp_pos_zlim': (-1.8, 1.8),
-                    'DBS_size_xlim': (0.2, 1),  # the cluster size limit in x-direction
+                    'DBS_size_xlim': (0.2, 1),
                     'DBS_size_ylim': (0.2, 1),
                     'DBS_size_zlim': (0.0, 2),
                     'DBS_sort': 3,
-                    # if sort is required, set it to a number for acquiring this number of the largest cluster
                 }
             },
             'BGNOISE_FILTER_CFG': {
                 'BGN_enable': True,
-                'BGN_deque_length': 50,  # ⚠️ 降低帧数要求，加快测试
+                'BGN_deque_length': 50,
                 'BGN_accept_SNR_threshold': (None, 200),
                 'BGN_filter_SNR_threshold': (None, 200),
-                'BGN_DBS_window_step': 50,  # 更频繁更新
-                'BGN_DBS_eps': 0.06,  # ⚠️ 扩大聚类半径
-                'BGN_DBS_min_samples': 5,  # ⚠️ 降低簇形成要求
-                'BGN_cluster_tf': 0.05,  # ⚠️ 降低背景点比例阈值
+                'BGN_DBS_window_step': 50,
+                'BGN_DBS_eps': 0.06,
+                'BGN_DBS_min_samples': 5,
+                'BGN_cluster_tf': 0.05,
                 'BGN_cluster_xextension': 0.05,
                 'BGN_cluster_yextension': 0.05,
-                'BGN_cluster_zextension': 0.05,  # ⚠️ 提高z方向容忍度
+                'BGN_cluster_zextension': 0.05,
             }
-
         }
+
         self.dbscan = DBSCANGenerator(**cfg)
-        self.bgn = BGNoiseFilter(**cfg)  # ✅ 初始化背景噪声滤波器
+        self.bgn = BGNoiseFilter(**cfg)
 
         # 输出文件夹
         if self.out_xlsx_dir:
@@ -163,43 +158,51 @@ class uartParser:
                 all_points = pd.concat(self.pointCloudCache, ignore_index=True)
                 data_np = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
 
-                # ✅ Step 1: 更新背景模型（学习阶段）
+                # ✅ Step1: 更新背景模型
                 self.bgn.BGN_update(data_np)
                 print(f"[BGN] 当前背景簇数量: {len(self.bgn.BGN_cluster_boundary)}")
-                print(f"[BGN] 队列缓存帧数: {len(self.bgn.BGN_deque)}/{self.bgn.BGN_deque.maxlen}")
 
-                # ✅ Step 2: 滤波（当模型已建立时才会生效）
+                # ✅ Step2: 背景滤波
                 filtered_data = self.bgn.BGN_filter(data_np)
-
                 print(f"[BGN] 输入点数: {data_np.shape[0]}, 滤波后点数: {filtered_data.shape[0]}")
-
                 filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
 
-                # ✅ Step2: 保存滤波后的点云
+                # ✅ 保存滤波后的点云
                 file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
                 filtered_df.to_excel(file_xlsx, index=False)
                 print(f"[Save] 滤波点云已保存 {file_xlsx}")
 
-                # ✅ Step3: DBSCAN 聚类
+                # ✅ Step3: DBSCAN 聚类 + 防损坏逻辑
                 cluster_path = None
                 if self.cluster_dir:
                     try:
                         _, valid_points_list, _, noise = self.dbscan.DBS(filtered_data)
                         cluster_path = os.path.join(self.cluster_dir, f"cluster_{self.uartCounter}.xlsx")
 
-                        with pd.ExcelWriter(cluster_path) as writer:
-                            for i, cluster in enumerate(valid_points_list):
-                                df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
-                            if len(noise) > 0:
-                                df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                df_noise.to_excel(writer, sheet_name='Noise', index=False)
-                        print(f"✅ Cluster saved: {cluster_path}")
+                        # ✅ 若无聚类结果，保存空sheet
+                        if len(valid_points_list) == 0 and len(noise) == 0:
+                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
+                                pd.DataFrame(columns=['X', 'Y', 'Z', 'Doppler', 'SNR']).to_excel(
+                                    writer, sheet_name='Empty', index=False)
+                            print(f"[DBSCAN] 无聚类结果，保存空文件 {cluster_path}")
+                        else:
+                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
+                                for i, cluster in enumerate(valid_points_list):
+                                    if len(cluster) == 0:
+                                        continue
+                                    df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                    df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
+                                if len(noise) > 0:
+                                    df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                    df_noise.to_excel(writer, sheet_name='Noise', index=False)
+                            print(f"✅ Cluster saved: {cluster_path}")
+
                     except Exception as e:
                         print(f"[DBSCAN ERROR] {e}")
 
-                # ✅ Step4: 通知 GUI（使用滤波后点云）
-                notify_new_pointcloud((file_xlsx, cluster_path))
+                # ✅ Step4: 通知 GUI
+                notify_new_pointcloud((file_xlsx, cluster_path, filtered_data))
+
 
         return parseStandardFrame(frameData)
 
@@ -271,7 +274,7 @@ class uartParser:
                 all_points = pd.concat(self.pointCloudCache, ignore_index=True)
                 data_np = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
 
-                # ✅ 背景滤波
+                # 背景滤波
                 filtered_data = self.bgn.BGN_filter(data_np)
                 filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
 
@@ -279,23 +282,34 @@ class uartParser:
                 file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
                 filtered_df.to_excel(file_xlsx, index=False)
 
-                # DBSCAN 聚类
+                # ✅ DBSCAN 聚类 + 空sheet保护
                 cluster_path = None
                 if self.cluster_dir:
                     try:
                         _, valid_points_list, _, noise = self.dbscan.DBS(filtered_data)
                         cluster_path = os.path.join(self.cluster_dir, f"cluster_{self.uartCounter}.xlsx")
-                        with pd.ExcelWriter(cluster_path) as writer:
-                            for i, cluster in enumerate(valid_points_list):
-                                df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
-                            if len(noise) > 0:
-                                df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                df_noise.to_excel(writer, sheet_name='Noise', index=False)
-                        print(f"✅ Cluster saved: {cluster_path}")
+
+                        if len(valid_points_list) == 0 and len(noise) == 0:
+                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
+                                pd.DataFrame(columns=['X', 'Y', 'Z', 'Doppler', 'SNR']).to_excel(
+                                    writer, sheet_name='Empty', index=False)
+                            print(f"[DBSCAN] 无聚类结果，保存空文件 {cluster_path}")
+                        else:
+                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
+                                for i, cluster in enumerate(valid_points_list):
+                                    if len(cluster) == 0:
+                                        continue
+                                    df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                    df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
+                                if len(noise) > 0:
+                                    df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                    df_noise.to_excel(writer, sheet_name='Noise', index=False)
+                            print(f"✅ Cluster saved: {cluster_path}")
+
                     except Exception as e:
                         print(f"[DBSCAN ERROR] {e}")
 
+                time.sleep(0.1)
                 notify_new_pointcloud((file_xlsx, cluster_path))
 
         return parseStandardFrame(frameData)

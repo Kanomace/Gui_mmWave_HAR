@@ -719,52 +719,65 @@ class App(tk.Tk):
             self._log(f"[PointCloud] 更新失败: {e}")
 
     def _on_new_pointcloud(self, payload):
-        """当有新的点云文件保存时（带聚类信息）"""
+        """当有新的点云文件保存时（带聚类信息 + 内存数据）"""
         try:
+            # payload = (file_path, cluster_path, filtered_data)
             if isinstance(payload, tuple):
-                file_path, cluster_path = payload
+                if len(payload) == 3:
+                    file_path, cluster_path, filtered_data = payload
+                else:
+                    file_path, cluster_path = payload
+                    filtered_data = None
             else:
                 file_path, cluster_path = payload, None
+                filtered_data = None
 
-            if not os.path.isfile(file_path):
-                self._log(f"[PointCloud] 文件不存在: {file_path}")
-                return
-
-            df = pd.read_excel(file_path)
-            if not {'X', 'Y', 'Z'}.issubset(df.columns):
-                self._log(f"[PointCloud] 缺少坐标列: {file_path}")
-                return
-
-            self.after(0, lambda: self._update_pointcloud(df, file_path, cluster_path))
+            if filtered_data is not None:
+                # ✅ 直接使用内存数据绘制（不读Excel）
+                self.after(0, lambda: self._update_pointcloud(None, file_path, cluster_path, filtered_data))
+            else:
+                # 兼容旧方式：从Excel读取
+                if not os.path.isfile(file_path):
+                    self._log(f"[PointCloud] 文件不存在: {file_path}")
+                    return
+                df = pd.read_excel(file_path)
+                self.after(0, lambda: self._update_pointcloud(df, file_path, cluster_path))
 
         except Exception as e:
             self._log(f"[PointCloud] 加载失败: {e}")
 
-    def _update_pointcloud(self, df, file_path, cluster_path=None):
+    def _update_pointcloud(self, df=None, file_path=None, cluster_path=None, filtered_data=None):
+        """
+        如果传入 filtered_data (numpy数组)，直接绘制；
+        否则从 df 中绘制。
+        """
         try:
             self.ax.clear()
 
-            # 计算 SNR 颜色归一化
-            if 'SNR' in df.columns:
-                norm_snr = (df['SNR'] - df['SNR'].min()) / (df['SNR'].max() - df['SNR'].min() + 1e-6)
+            if filtered_data is not None:
+                # ✅ 内存点云绘制
+                xs, ys, zs = filtered_data[:, 0], filtered_data[:, 1], filtered_data[:, 2]
+                snr = filtered_data[:, 4] if filtered_data.shape[1] >= 5 else np.zeros_like(xs)
             else:
-                norm_snr = np.zeros(len(df))
+                # Excel/df 方式绘制（旧逻辑）
+                xs, ys, zs = df['X'], df['Y'], df['Z']
+                snr = df['SNR'] if 'SNR' in df.columns else np.zeros(len(df))
 
-            # 绘制点云
-            self.ax.scatter(df['X'], df['Y'], df['Z'], c=norm_snr, cmap='jet', s=8)
+            # 颜色归一化
+            norm_snr = (snr - np.min(snr)) / (np.ptp(snr) + 1e-6)
+            self.ax.scatter(xs, ys, zs, c=norm_snr, cmap='jet', s=8)
 
-            # 固定坐标范围为 ±2m
+            # 固定坐标范围
             self.ax.set_xlim(-4, 4)
             self.ax.set_ylim(0, 8)
             self.ax.set_zlim(-4, 4)
             self.ax.set_box_aspect([1, 1, 1])
-
             self.ax.set_xlabel('X (m)')
             self.ax.set_ylabel('Y (m)')
             self.ax.set_zlabel('Z (m)')
-            self.ax.set_title(os.path.basename(file_path))
+            self.ax.set_title(os.path.basename(file_path) if file_path else "Realtime Cloud")
 
-            # ========== 绘制 DBSCAN 聚类框 ==========
+            # ✅ 绘制 DBSCAN 框（保持原逻辑）
             if cluster_path and os.path.isfile(cluster_path):
                 try:
                     xl = pd.ExcelFile(cluster_path)
@@ -778,8 +791,6 @@ class App(tk.Tk):
                         xmin, xmax = cdf['X'].min(), cdf['X'].max()
                         ymin, ymax = cdf['Y'].min(), cdf['Y'].max()
                         zmin, zmax = cdf['Z'].min(), cdf['Z'].max()
-
-                        # 绘制立方框
                         x = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
                         y = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
                         z = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
@@ -789,19 +800,15 @@ class App(tk.Tk):
                             (0, 4), (1, 5), (2, 6), (3, 7)
                         ]
                         for e0, e1 in edges:
-                            self.ax.plot(
-                                [x[e0], x[e1]],
-                                [y[e0], y[e1]],
-                                [z[e0], z[e1]],
-                                color='red', linewidth=1.2
-                            )
+                            self.ax.plot([x[e0], x[e1]], [y[e0], y[e1]], [z[e0], z[e1]], color='red', linewidth=1.2)
                 except Exception as e:
                     self._log(f"[ClusterDraw] 绘制聚类框失败: {e}")
 
             self.canvas.draw()
+            self._log(f"[PointCloud] 显示: {os.path.basename(file_path) if file_path else '(memory)'}")
 
         except Exception as e:
-            print(f"[PointCloudView] Failed to update: {e}")
+            self._log(f"[PointCloudView] Failed to update: {e}")
 
 
 # ----------------- Main Entrypoint -----------------
