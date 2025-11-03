@@ -1,4 +1,7 @@
-# gui_main.py
+# gui_main_updated.py
+# ================================================================
+# 适配最新 gui_parser.py + 添加 XY 平面人体轨迹可视化
+# ================================================================
 
 import os
 import sys
@@ -18,16 +21,12 @@ import datetime
 from pointcloud_notifier import register_callback
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-
-# Matplotlib for 3D point cloud display
 import matplotlib
 matplotlib.use("TkAgg")
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 
-# Your existing modules (unchanged)
+# 现有模块
 from voxelization import monitor_folder as voxel_monitor_folder
 from projection import monitor_voxel_folder as projection_monitor_voxel_folder
 from projection import create_single_projection
@@ -36,9 +35,6 @@ from main import (
     RealTimeBuffer, load_model,
     GRID_SIZE, BOUNDARIES, WINDOW_SIZE, SEQ_LEN, BATCH_SIZE,
 )
-
-# Notifier for cross-module callbacks (must exist as file pointcloud_notifier.py)
-from pointcloud_notifier import register_callback  # used in main to register callback
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -50,10 +46,7 @@ def list_serial_ports():
 
 # ----------------- Radar Dumper -----------------
 class RadarToXlsxDumper:
-    """
-    雷达数据采集器：通过 gui_parser.uartParser 读取并保存 .xlsx/.bin
-    （此类保持原有行为，不做可视化职责）
-    """
+    """雷达数据采集器：通过 gui_parser.uartParser 读取并保存 .xlsx/.bin"""
 
     def __init__(self, xlsx_out_dir,
                  device_type="IWR6843",
@@ -80,7 +73,7 @@ class RadarToXlsxDumper:
 
             self.parser = uartParser(
                 type=self.demo_type,
-                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),  # 自动对应 bin 文件夹
+                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),
                 out_xlsx_dir=self.xlsx_out_dir
             )
             self.parser.setSaveBinary(1)
@@ -114,8 +107,12 @@ class RadarToXlsxDumper:
         if self.thread:
             self.thread.join(timeout=1.0)
         try:
-            if self.parser and hasattr(self.parser, "close"):
-                self.parser.close()
+            if self.parser and hasattr(self.parser, 'cliCom'):
+                if hasattr(self.parser.cliCom, 'close'):
+                    self.parser.cliCom.close()
+            if self.parser and hasattr(self.parser, 'dataCom'):
+                if hasattr(self.parser.dataCom, 'close'):
+                    self.parser.dataCom.close()
         except Exception:
             pass
         self.log("[RadarDumper] stopped")
@@ -133,7 +130,7 @@ class RadarToXlsxDumper:
                     break
 
                 if time.time() - last_print > 5:
-                    self.log(f"[RadarDumper] running... (device={self.device_type}, demo={self.demo_type})")
+                    self.log(f"[RadarDumper] running... (device={self.device_type})")
                     last_print = time.time()
 
             except Exception as e:
@@ -162,7 +159,7 @@ class RealtimePipelineController:
         self.realtime_yoz_dir = ""
         self.realtime_xoy_dir = ""
         self.output_dir = ""
-        self.realtime_bin_dir = ""  # 新增 bin 文件夹
+        self.realtime_bin_dir = ""
 
         self.checkpoint_path = ""
         self.rope_informer_dir = ""
@@ -178,12 +175,10 @@ class RealtimePipelineController:
 
     def set_paths(self, data_root, ckpt_path, rope_dir, cfg_file):
         self.data_root = data_root
-        # 生成带时间戳的输出主文件夹
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_root = os.path.join(data_root, timestamp)
         os.makedirs(self.output_root, exist_ok=True)
 
-        # 所有实时文件夹放在 output_root 下
         self.realtime_xlsx_dir = os.path.join(self.output_root, "xlsx")
         self.realtime_bin_dir = os.path.join(self.output_root, "bin")
         self.realtime_voxel_dir = os.path.join(self.output_root, "pHistBytes_voxel")
@@ -373,8 +368,6 @@ class RealtimePipelineController:
 
         self.log("Realtime inference loop stopped.")
 
-
-    # ---------------- Radar dumper ----------------
     def start_radar_dumper(self):
         self.radar_dumper = RadarToXlsxDumper(
             self.realtime_xlsx_dir,
@@ -396,8 +389,6 @@ class RealtimePipelineController:
             self.radar_dumper = None
             self.log("[Controller] Radar dumper stopped.")
 
-
-    # ---------------- Pipeline Control ----------------
     def start(self):
         self._ensure_dirs()
 
@@ -438,8 +429,8 @@ class RealtimePipelineController:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mmWave HAR 实时推理 - 简易UI")
-        self.geometry("1200x800")
+        self.title("mmWave HAR 实时推理 - 增强UI (3D点云 + XY轨迹)")
+        self.geometry("1600x900")
 
         self.data_root = tk.StringVar()
         self.ckpt_path = tk.StringVar()
@@ -451,23 +442,29 @@ class App(tk.Tk):
         self.data_com_var = tk.StringVar()
         self.log_queue = queue.Queue()
 
-        # queue 用于跨线程接收 pointcloud_notifier 的通知（线程安全）
+        # 点云数据队列（线程安全）
         self.pointcloud_queue = queue.Queue()
+
+        # 轨迹历史记录
+        self.trajectory_history = []
+        self.max_trajectory_points = 100
 
         self.controller = RealtimePipelineController(
             log_fn=self._log,
             result_fn=self._push_result_row
         )
 
-        # build UI first
         self._build_ui()
-        # load config
         self._load_config()
-        # 定时取出日志显示
         self.after(100, self._drain_log_queue)
-        register_callback(self._on_new_pointcloud)
-        # 定时处理点云队列（在主线程绘制）
         self.after(100, self._process_pointcloud_queue)
+
+        # 注册点云回调
+        try:
+            register_callback(self._on_new_pointcloud)
+            self._log("[Notifier] GUI callback registered.")
+        except Exception as e:
+            self._log(f"[Notifier] 注册失败: {e}")
 
     # ---------------- UI 构建 ----------------
     def _build_ui(self):
@@ -515,14 +512,16 @@ class App(tk.Tk):
         ttk.Button(frm_btn, text="启动", command=self._on_start).pack(side="left", padx=4)
         ttk.Button(frm_btn, text="停止", command=self._on_stop).pack(side="left", padx=4)
         ttk.Button(frm_btn, text="保存配置", command=self._save_config).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="清除轨迹", command=self._clear_trajectory).pack(side="left", padx=4)
 
-        # -------- 主体区域：左日志 + 右点云 --------
+        # -------- 主体区域：左日志 + 中间3D点云 + 右XY轨迹 --------
         frm_main = ttk.Frame(self)
         frm_main.pack(fill="both", expand=True, **pad)
 
         # 左侧：日志和结果
-        frm_left = ttk.Frame(frm_main)
-        frm_left.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        frm_left = ttk.Frame(frm_main, width=400)
+        frm_left.pack(side="left", fill="both", expand=False, padx=4, pady=4)
+        frm_left.pack_propagate(False)
 
         frm_log = ttk.LabelFrame(frm_left, text="日志输出")
         frm_log.pack(fill="both", expand=True, **pad)
@@ -535,22 +534,40 @@ class App(tk.Tk):
         self.tree.heading("sample", text="样本")
         self.tree.heading("label", text="行为")
         self.tree.heading("confidence", text="置信度")
+        self.tree.column("sample", width=100)
+        self.tree.column("label", width=80)
+        self.tree.column("confidence", width=80)
         self.tree.pack(fill="both", expand=True)
 
-        # 右侧：点云显示
-        frm_right = ttk.LabelFrame(frm_main, text="点云显示 (X-Y-Z)")
+        # 中间：3D点云显示
+        frm_center = ttk.LabelFrame(frm_main, text="3D 点云显示 (X-Y-Z)")
+        frm_center.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+
+        fig_3d = Figure(figsize=(6, 6))
+        self.ax_3d = fig_3d.add_subplot(111, projection="3d")
+        self.ax_3d.set_xlabel("X (m)")
+        self.ax_3d.set_ylabel("Y (m)")
+        self.ax_3d.set_zlabel("Z (m)")
+        self.ax_3d.set_xlim(-4, 4)
+        self.ax_3d.set_ylim(0, 8)
+        self.ax_3d.set_zlim(-4, 4)
+        self.canvas_3d = FigureCanvasTkAgg(fig_3d, master=frm_center)
+        self.canvas_3d.get_tk_widget().pack(fill="both", expand=True)
+
+        # 右侧：XY平面轨迹显示
+        frm_right = ttk.LabelFrame(frm_main, text="XY 平面人体轨迹")
         frm_right.pack(side="right", fill="both", expand=True, padx=4, pady=4)
 
-        # matplotlib 图
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        fig = plt.Figure(figsize=(5, 5))
-        self.ax = fig.add_subplot(111, projection="3d")
-        self.ax.set_xlabel("X (m)")
-        self.ax.set_ylabel("Y (m)")
-        self.ax.set_zlabel("Z (m)")
-        self.canvas = FigureCanvasTkAgg(fig, master=frm_right)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        fig_xy = Figure(figsize=(5, 6))
+        self.ax_xy = fig_xy.add_subplot(111)
+        self.ax_xy.set_xlabel("X (m)")
+        self.ax_xy.set_ylabel("Y (m)")
+        self.ax_xy.set_xlim(-4, 4)
+        self.ax_xy.set_ylim(0, 8)
+        self.ax_xy.grid(True, alpha=0.3)
+        self.ax_xy.set_aspect('equal')
+        self.canvas_xy = FigureCanvasTkAgg(fig_xy, master=frm_right)
+        self.canvas_xy.get_tk_widget().pack(fill="both", expand=True)
 
     # ---------------- Config ----------------
     def _save_config(self):
@@ -599,21 +616,32 @@ class App(tk.Tk):
             self.controller.cli_com = self.cli_com_var.get()
             self.controller.data_com = self.data_com_var.get()
             self.controller.start()
-            self.status_var.set("状态: 已启动")
+            self._log("状态: 已启动")
         except Exception as e:
             self._log(f"[Error] 启动失败: {e}")
-            self.status_var.set("状态: 启动失败")
 
     def _on_stop(self):
         try:
             self.controller.stop()
-            self.status_var.set("状态: 已停止")
+            self._log("状态: 已停止")
         except Exception as e:
             self._log(f"[Error] 停止失败: {e}")
 
+    def _clear_trajectory(self):
+        """清除轨迹历史"""
+        self.trajectory_history.clear()
+        self.ax_xy.clear()
+        self.ax_xy.set_xlabel("X (m)")
+        self.ax_xy.set_ylabel("Y (m)")
+        self.ax_xy.set_xlim(-4, 4)
+        self.ax_xy.set_ylim(0, 8)
+        self.ax_xy.grid(True, alpha=0.3)
+        self.ax_xy.set_aspect('equal')
+        self.canvas_xy.draw()
+        self._log("[Trajectory] 轨迹已清除")
+
     # ---------------- Logging ----------------
     def _log(self, msg):
-        # put to queue to avoid threading issues
         self.log_queue.put(msg)
 
     def _drain_log_queue(self):
@@ -625,204 +653,195 @@ class App(tk.Tk):
 
     # ---------------- Result ----------------
     def _push_result_row(self, result):
-        self.tree.insert("", "end", values=(result["sample_name"], result["pred_label"], f"{result['confidence']:.4f}"))
+        self.tree.insert("", "end", values=(
+            result["sample_name"],
+            result["pred_label"],
+            f"{result['confidence']:.4f}"
+        ))
 
-    # ---------------- Pointcloud queue handling ----------------
-    def _enqueue_pointcloud(self, file_path):
-        """
-        This function is safe to be called from other threads (it's registered as callback).
-        It only enqueues the file path for the main thread to process.
-        """
+    # ---------------- Pointcloud Callback ----------------
+    def _on_new_pointcloud(self, payload):
+        """当有新的点云文件保存时（从 gui_parser 通过 notifier 回调）"""
         try:
-            self.pointcloud_queue.put(file_path)
+            # ✅ 适配最新 gui_parser.py 的 payload 格式
+            # payload = (file_xlsx, cluster_path, filtered_data)
+            if isinstance(payload, tuple) and len(payload) >= 3:
+                file_path, cluster_path, filtered_data = payload[:3]
+                # 将数据放入队列，交由主线程处理
+                self.pointcloud_queue.put((file_path, cluster_path, filtered_data))
+            else:
+                self._log(f"[PointCloud] 未知的 payload 格式: {type(payload)}")
         except Exception as e:
-            # put best-effort log
-            self._log(f"[PointCloud] enqueue error: {e}")
+            self._log(f"[PointCloud] 回调错误: {e}")
 
     def _process_pointcloud_queue(self):
-        """
-        Called periodically on the main thread to process queued pointcloud file paths.
-        """
+        """主线程定时处理点云队列"""
         try:
             while not self.pointcloud_queue.empty():
-                file_path = self.pointcloud_queue.get_nowait()
-                # process and draw
-                self._update_pointcloud_view(file_path)
+                file_path, cluster_path, filtered_data = self.pointcloud_queue.get_nowait()
+                # 更新 3D 点云显示
+                self._update_3d_pointcloud(file_path, cluster_path, filtered_data)
         except Exception as e:
-            self._log(f"[PointCloud] processing error: {e}")
+            self._log(f"[PointCloud] 处理队列错误: {e}")
         finally:
             self.after(100, self._process_pointcloud_queue)
 
-    def _update_pointcloud_view(self, file_path):
-        """
-        Load the saved xlsx file and draw 3D scatter with SNR color mapping.
-        This runs on the Tk main thread.
-        """
+    # ---------------- 3D Point Cloud Visualization ----------------
+    def _update_3d_pointcloud(self, file_path, cluster_path, filtered_data):
+        """更新 3D 点云显示（带 DBSCAN 聚类框）"""
         try:
-            if not os.path.isfile(file_path):
-                self._log(f"[PointCloud] 文件不存在: {file_path}")
-                return
+            self.ax_3d.clear()
 
-            df = pd.read_excel(file_path)
-            # look for common column name variants
-            cols = {c.lower(): c for c in df.columns}
-            if not all(k in cols for k in ("x", "y", "z")):
-                self._log(f"[PointCloud] 文件缺少 X/Y/Z 列: {file_path}")
-                return
-
-            xcol = cols["x"]
-            ycol = cols["y"]
-            zcol = cols["z"]
-            # snr optional
-            snr_col = cols.get("snr", None)
-
-            xs = df[xcol].to_numpy(dtype=float)
-            ys = df[ycol].to_numpy(dtype=float)
-            zs = df[zcol].to_numpy(dtype=float)
-
-            # build colors from SNR if present, else use height-based color
-            if snr_col:
-                snr = df[snr_col].to_numpy(dtype=float)
-                # normalize 0..1
-                if np.nanmax(snr) - np.nanmin(snr) > 1e-6:
-                    norm = (snr - np.nanmin(snr)) / (np.nanmax(snr) - np.nanmin(snr))
-                else:
-                    norm = np.clip(snr, 0, 1)
-                cmap = matplotlib.cm.get_cmap("jet")
-                colors = cmap(norm)
-            else:
-                # fallback: color by z
-                if np.nanmax(zs) - np.nanmin(zs) > 1e-6:
-                    normz = (zs - np.nanmin(zs)) / (np.nanmax(zs) - np.nanmin(zs))
-                else:
-                    normz = np.zeros_like(zs)
-                cmap = matplotlib.cm.get_cmap("viridis")
-                colors = cmap(normz)
-
-            self.ax.cla()
-            self.ax.scatter(xs, ys, zs, c=colors, s=6)
-            self.ax.set_xlabel('X (m)')
-            self.ax.set_ylabel('Y (m)')
-            self.ax.set_zlabel('Z (m)')
-            self.ax.set_title(os.path.basename(file_path))
-            # optionally adjust limits
-            try:
-                margin = 0.5
-                self.ax.set_xlim(np.nanmin(xs)-margin, np.nanmax(xs)+margin)
-                self.ax.set_ylim(np.nanmin(ys)-margin, np.nanmax(ys)+margin)
-                self.ax.set_zlim(np.nanmin(zs)-margin, np.nanmax(zs)+margin)
-            except Exception:
-                pass
-            self.canvas.draw()
-            self._log(f"[PointCloud] 显示: {os.path.basename(file_path)}")
-        except Exception as e:
-            self._log(f"[PointCloud] 更新失败: {e}")
-
-    def _on_new_pointcloud(self, payload):
-        """当有新的点云文件保存时（带聚类信息 + 内存数据）"""
-        try:
-            # payload = (file_path, cluster_path, filtered_data)
-            if isinstance(payload, tuple):
-                if len(payload) == 3:
-                    file_path, cluster_path, filtered_data = payload
-                else:
-                    file_path, cluster_path = payload
-                    filtered_data = None
-            else:
-                file_path, cluster_path = payload, None
-                filtered_data = None
-
-            if filtered_data is not None:
-                # ✅ 直接使用内存数据绘制（不读Excel）
-                self.after(0, lambda: self._update_pointcloud(None, file_path, cluster_path, filtered_data))
-            else:
-                # 兼容旧方式：从Excel读取
-                if not os.path.isfile(file_path):
-                    self._log(f"[PointCloud] 文件不存在: {file_path}")
-                    return
-                df = pd.read_excel(file_path)
-                self.after(0, lambda: self._update_pointcloud(df, file_path, cluster_path))
-
-        except Exception as e:
-            self._log(f"[PointCloud] 加载失败: {e}")
-
-    def _update_pointcloud(self, df=None, file_path=None, cluster_path=None, filtered_data=None):
-        """
-        如果传入 filtered_data (numpy数组)，直接绘制；
-        否则从 df 中绘制。
-        """
-        try:
-            self.ax.clear()
-
-            if filtered_data is not None:
-                # ✅ 内存点云绘制
-                xs, ys, zs = filtered_data[:, 0], filtered_data[:, 1], filtered_data[:, 2]
+            # ✅ 使用内存中的 filtered_data (numpy 数组)
+            if filtered_data is not None and len(filtered_data) > 0:
+                xs = filtered_data[:, 0]
+                ys = filtered_data[:, 1]
+                zs = filtered_data[:, 2]
                 snr = filtered_data[:, 4] if filtered_data.shape[1] >= 5 else np.zeros_like(xs)
 
+                # 颜色归一化（基于 SNR）
+                if np.ptp(snr) > 1e-6:
+                    norm_snr = (snr - np.min(snr)) / (np.ptp(snr) + 1e-6)
+                else:
+                    norm_snr = np.zeros_like(snr)
 
-            # 颜色归一化
-            norm_snr = (snr - np.min(snr)) / (np.ptp(snr) + 1e-6)
-            self.ax.scatter(xs, ys, zs, c=norm_snr, cmap='jet', s=8)
+                # 绘制点云
+                self.ax_3d.scatter(xs, ys, zs, c=norm_snr, cmap='jet', s=8, alpha=0.6)
 
-            # 固定坐标范围
-            self.ax.set_xlim(-4, 4)
-            self.ax.set_ylim(0, 8)
-            self.ax.set_zlim(-4, 4)
-            self.ax.set_box_aspect([1, 1, 1])
-            self.ax.set_xlabel('X (m)')
-            self.ax.set_ylabel('Y (m)')
-            self.ax.set_zlabel('Z (m)')
-            self.ax.set_title(os.path.basename(file_path) if file_path else "Realtime Cloud")
-
-            # ✅ 绘制 DBSCAN 框（保持原逻辑）
+            # ✅ 绘制 DBSCAN 聚类边界框
             if cluster_path and os.path.isfile(cluster_path):
                 try:
                     xl = pd.ExcelFile(cluster_path)
                     for sheet_name in xl.sheet_names:
-                        if "Cluster" not in sheet_name:
-                            continue
-                        cdf = xl.parse(sheet_name)
-                        if not {'X', 'Y', 'Z'}.issubset(cdf.columns):
+                        if "Cluster" not in sheet_name or sheet_name == "Empty":
                             continue
 
+                        cdf = xl.parse(sheet_name)
+                        if not {'X', 'Y', 'Z'}.issubset(cdf.columns) or len(cdf) == 0:
+                            continue
+
+                        # 计算聚类边界
                         xmin, xmax = cdf['X'].min(), cdf['X'].max()
                         ymin, ymax = cdf['Y'].min(), cdf['Y'].max()
                         zmin, zmax = cdf['Z'].min(), cdf['Z'].max()
+
+                        # 计算聚类中心（用于 XY 轨迹）
+                        cx = (xmin + xmax) / 2
+                        cy = (ymin + ymax) / 2
+                        cz = (zmin + zmax) / 2
+
+                        # 添加到轨迹历史
+                        self.trajectory_history.append((cx, cy, time.time()))
+                        if len(self.trajectory_history) > self.max_trajectory_points:
+                            self.trajectory_history.pop(0)
+
+                        # 绘制 3D 边界框
                         x = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
                         y = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
                         z = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+
                         edges = [
-                            (0, 1), (1, 2), (2, 3), (3, 0),
-                            (4, 5), (5, 6), (6, 7), (7, 4),
-                            (0, 4), (1, 5), (2, 6), (3, 7)
+                            (0, 1), (1, 2), (2, 3), (3, 0),  # 底面
+                            (4, 5), (5, 6), (6, 7), (7, 4),  # 顶面
+                            (0, 4), (1, 5), (2, 6), (3, 7)   # 竖边
                         ]
+
                         for e0, e1 in edges:
-                            self.ax.plot([x[e0], x[e1]], [y[e0], y[e1]], [z[e0], z[e1]], color='red', linewidth=1.2)
+                            self.ax_3d.plot(
+                                [x[e0], x[e1]],
+                                [y[e0], y[e1]],
+                                [z[e0], z[e1]],
+                                color='red', linewidth=1.5
+                            )
+
+                        # 标注聚类中心
+                        self.ax_3d.text(cx, cy, cz, f'C{sheet_name.split("_")[-1]}',
+                                       color='yellow', fontsize=10, weight='bold')
+
                 except Exception as e:
                     self._log(f"[ClusterDraw] 绘制聚类框失败: {e}")
 
-            self.canvas.draw()
-            self._log(f"[PointCloud] 显示: {os.path.basename(file_path) if file_path else '(memory)'}")
+            # 设置固定坐标范围
+            self.ax_3d.set_xlabel('X (m)')
+            self.ax_3d.set_ylabel('Y (m)')
+            self.ax_3d.set_zlabel('Z (m)')
+            self.ax_3d.set_xlim(-4, 4)
+            self.ax_3d.set_ylim(0, 8)
+            self.ax_3d.set_zlim(-4, 4)
+            self.ax_3d.set_box_aspect([1, 1, 1])
+            self.ax_3d.set_title(os.path.basename(file_path) if file_path else "Realtime Cloud")
+
+            self.canvas_3d.draw()
+
+            # ✅ 更新 XY 轨迹图
+            self._update_xy_trajectory()
+
+            self._log(f"[PointCloud] 已更新 3D 显示: {os.path.basename(file_path) if file_path else '(memory)'}")
 
         except Exception as e:
-            self._log(f"[PointCloudView] Failed to update: {e}")
+            self._log(f"[PointCloudView] 更新失败: {e}")
+
+    # ---------------- XY Trajectory Visualization ----------------
+    def _update_xy_trajectory(self):
+        """更新 XY 平面人体轨迹显示"""
+        try:
+            self.ax_xy.clear()
+
+            # 设置坐标系
+            self.ax_xy.set_xlabel("X (m)")
+            self.ax_xy.set_ylabel("Y (m)")
+            self.ax_xy.set_xlim(-4, 4)
+            self.ax_xy.set_ylim(0, 8)
+            self.ax_xy.grid(True, alpha=0.3)
+            self.ax_xy.set_aspect('equal')
+
+            if len(self.trajectory_history) == 0:
+                self.ax_xy.set_title("XY 轨迹（无数据）")
+                self.canvas_xy.draw()
+                return
+
+            # ✅ 提取轨迹点
+            xs = [p[0] for p in self.trajectory_history]
+            ys = [p[1] for p in self.trajectory_history]
+            timestamps = [p[2] for p in self.trajectory_history]
+
+            # ✅ 根据时间设置颜色（越新越亮）
+            current_time = time.time()
+            alphas = []
+            for ts in timestamps:
+                age = current_time - ts
+                alpha = max(0.1, 1.0 - age / 30.0)  # 30秒内渐变
+                alphas.append(alpha)
+
+            # ✅ 绘制轨迹线
+            for i in range(len(xs) - 1):
+                self.ax_xy.plot(
+                    xs[i:i+2], ys[i:i+2],
+                    color='blue',
+                    alpha=alphas[i],
+                    linewidth=2
+                )
+
+            # ✅ 绘制轨迹点
+            self.ax_xy.scatter(xs, ys, c=alphas, cmap='Blues', s=30, alpha=0.8, edgecolors='navy')
+
+            # ✅ 标注最新位置
+            if len(xs) > 0:
+                self.ax_xy.scatter(xs[-1], ys[-1], c='red', s=100, marker='*',
+                                  edgecolors='darkred', linewidths=2, zorder=10)
+                self.ax_xy.text(xs[-1] + 0.2, ys[-1] + 0.2, 'Current',
+                               fontsize=10, color='red', weight='bold')
+
+            # ✅ 显示轨迹数量
+            self.ax_xy.set_title(f"XY 轨迹（共 {len(self.trajectory_history)} 点）")
+
+            self.canvas_xy.draw()
+
+        except Exception as e:
+            self._log(f"[Trajectory] 更新失败: {e}")
 
 
 # ----------------- Main Entrypoint -----------------
 if __name__ == "__main__":
-    # create app
     app = App()
-
-    # register the notifier callback to enqueue pointcloud file paths (thread-safe)
-    try:
-        # import here to avoid circular import issues in some environments
-        from pointcloud_notifier import register_callback
-
-        register_callback(self._enqueue_pointcloud)
-        print("[DEBUG] GUI callback registered.")
-        self.after(500, self._process_pointcloud_queue)
-
-    except Exception as e:
-        app._log(f"[Notifier] 注册失败: {e}")
-
     app.mainloop()
