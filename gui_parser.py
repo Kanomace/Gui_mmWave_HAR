@@ -1,10 +1,13 @@
-# gui_parser_with_bgn_fixed.py
-# ---------------------------------------------------------------
-# 功能：
-#   1️⃣ 实时接收点云帧并保存为 xlsx
-#   2️⃣ 在 DBSCAN 聚类前使用 BGNoiseFilter 背景噪声过滤
-#   3️⃣ 若点云过少或无聚类结果，也保存空sheet防止文件损坏
-# ---------------------------------------------------------------
+# gui_parser_en.py
+# ================================================================
+# Full English Version with Warmup Mechanism
+# Features:
+#   1. Real-time point cloud frame reception and saving as xlsx
+#   2. Background noise filtering using BGNoiseFilter
+#   3. DBSCAN clustering with empty file protection
+#   4. Human tracking using HumanTracking module
+#   5. Notify GUI via pointcloud_notifier
+# ================================================================
 
 import os
 import sys
@@ -13,16 +16,21 @@ import datetime
 import pandas as pd
 import numpy as np
 import serial
+import warnings
+
+# ✅ Suppress all warnings
+warnings.filterwarnings('ignore')
 
 from pointcloud_notifier import notify_new_pointcloud
 from library.parseFrame import *
 from library.DBSCAN_generator import DBSCANGenerator
-from library.bgnoise_filter import BGNoiseFilter   # ✅ 背景噪声滤波模块
+from library.bgnoise_filter import BGNoiseFilter
+from library.human_tracking import HumanTracking
 
 
 class uartParser:
     def __init__(self, type='SDK Out of Box Demo', out_bin_dir=None, out_xlsx_dir=None):
-        """初始化UART解析器"""
+        """UART parser initialization"""
         self.saveBinary = 0
         self.replay = 0
         self.binData = bytearray()
@@ -35,7 +43,7 @@ class uartParser:
         self.out_bin_dir = out_bin_dir
         self.out_xlsx_dir = out_xlsx_dir
 
-        # ------------------- 类型判断 -------------------
+        # ------------------- Type Detection -------------------
         if type in [DEMO_NAME_OOB, DEMO_NAME_LRPD, DEMO_NAME_3DPC,
                     DEMO_NAME_SOD, DEMO_NAME_VITALS, DEMO_NAME_MT, DEMO_NAME_GESTURE]:
             self.parserType = "DoubleCOMPort"
@@ -44,9 +52,9 @@ class uartParser:
         elif type == "Replay":
             self.replay = 1
         else:
-            print("ERROR, unsupported demo type selected!")
+            print("[ERROR] Unsupported demo type selected!")
 
-        # ------------------- 初始化 DBSCAN + BGNoiseFilter -------------------
+        # ------------------- Module Configuration -------------------
         cfg = {
             'DBSCAN_GENERATOR_CFG': {
                 'Default': {
@@ -73,27 +81,76 @@ class uartParser:
                 'BGN_cluster_xextension': 0.05,
                 'BGN_cluster_yextension': 0.05,
                 'BGN_cluster_zextension': 0.05,
-            }
+            },
+            'HUMAN_TRACKING_CFG': {
+                'TRK_enable': True,
+                'TRK_obj_bin_number': 2,
+                'TRK_poss_clus_deque_length': 3,
+                'TRK_redundant_clus_remove_cp_dis': 1,
+            },
+            'HUMAN_OBJECT_CFG': {
+                'obj_deque_length': 60,
+                'dis_diff_threshold': {
+                    'threshold': 0.8,
+                    'dynamic_ratio': 0.2,
+                },
+                'size_diff_threshold': 1,
+                'expect_pos': {
+                    'default': (None, None, 1.1),
+                    'standing': (None, None, 1.1),
+                    'sitting': (None, None, 0.7),
+                    'lying': (None, None, 0.5),
+                },
+                'expect_shape': {
+                    'default': (0.8, 0.8, 1.8),
+                    'standing': (0.7, 0.7, 1.5),
+                    'sitting': (0.3, 0.3, 0.6),
+                    'lying': (0.8, 0.8, 0.4),
+                },
+                'sub_possibility_proportion': (1, 1, 1, 1),
+                'inactive_timeout': 5,
+                'obj_delete_timeout': 60,
+                'fuzzy_boundary_enter': False,
+                'fuzzy_boundary_threshold': 0.5,
+                'scene_xlim': (-4, 4),
+                'scene_ylim': (0, 8),
+                'scene_zlim': (-4, 4),
+                'standing_sitting_threshold': 0.9,
+                'sitting_lying_threshold': 0.4,
+                'get_fuzzy_pos_No': 20,
+                'get_fuzzy_status_No': 40,
+            },
         }
 
+        # ------------------- Module Initialization -------------------
         self.dbscan = DBSCANGenerator(**cfg)
         self.bgn = BGNoiseFilter(**cfg)
+        self.tracker = HumanTracking(
+            HUMAN_TRACKING_CFG=cfg['HUMAN_TRACKING_CFG'],
+            HUMAN_OBJECT_CFG=cfg['HUMAN_OBJECT_CFG']
+        )
 
-        # 输出文件夹
+        # ✅ Background filter warmup counter
+        self.bgn_warmup_counter = 0
+        self.bgn_warmup_frames = 10  # First 10 frames for building background model
+
+        # Output paths
         if self.out_xlsx_dir:
             self.cluster_dir = os.path.join(self.out_xlsx_dir, "cluster_xlsx")
             os.makedirs(self.cluster_dir, exist_ok=True)
         else:
             self.cluster_dir = None
 
-    # ------------------- 公共方法 -------------------
+    # ------------------- Public Methods -------------------
     def setSaveBinary(self, saveBinary: int):
         self.saveBinary = saveBinary
-        print(f"saveBinary set to: {self.saveBinary}")
+        print(f"[Parser] SaveBinary set to: {self.saveBinary}")
 
-    # ------------------- 双串口模式 -------------------
+    # ================================================================
+    # Serial Port Mode
+    # ================================================================
     def readAndParseUartDoubleCOMPort(self):
-        """双串口读取 + 背景滤波 + DBSCAN 聚类"""
+        """Double COM port read + background filtering + DBSCAN clustering + human tracking"""
         self.fail = 0
         if self.replay:
             return self.replayHist()
@@ -102,7 +159,7 @@ class uartParser:
         magicByte = self.dataCom.read(1)
         frameData = bytearray()
 
-        # --- 识别帧头 ---
+        # --- Frame header recognition ---
         while True:
             if len(magicByte) < 1:
                 magicByte = self.dataCom.read(1)
@@ -118,18 +175,19 @@ class uartParser:
                 index = 0
                 frameData = bytearray()
 
-        # --- 读取帧体 ---
+        # --- Read frame body ---
         frameData += self.dataCom.read(4)  # version
         lengthBytes = self.dataCom.read(4)
         frameData += lengthBytes
         frameLength = int.from_bytes(lengthBytes, 'little') - 16
         frameData += self.dataCom.read(frameLength)
 
-        # -------------------- 解析点云 --------------------
+        # ================================================================
+        # ✅ Step1: Parse frame
+        # ================================================================
         if self.saveBinary == 1:
             self.binData += frameData
             self.uartCounter += 1
-
             outputDict = parseStandardFrame(frameData)
             frame_df = pd.DataFrame(
                 outputDict["pointCloud"],
@@ -137,78 +195,105 @@ class uartParser:
             )
             self.pointCloudCache.append(frame_df)
 
-            # 保持缓存帧数
+            # Cache control
             if len(self.pointCloudCache) > self.framesPerFile:
                 self.pointCloudCache.pop(0)
 
-            # 达到缓存数量后保存
+            # ================================================================
+            # ✅ Step2: Process after reaching cache limit
+            # ================================================================
             if len(self.pointCloudCache) == self.framesPerFile:
                 if self.first_file:
                     os.makedirs(self.out_bin_dir, exist_ok=True)
                     os.makedirs(self.out_xlsx_dir, exist_ok=True)
                     self.first_file = False
 
-                # 保存 bin
+                # Save bin file
                 file_bin = os.path.join(self.out_bin_dir, f"pHistBytes_{self.uartCounter}.bin")
                 with open(file_bin, 'wb') as bfile:
                     bfile.write(bytes(self.binData))
                 self.binData = bytearray()
 
-                # 合并帧
+                # Merge frame data
                 all_points = pd.concat(self.pointCloudCache, ignore_index=True)
                 data_np = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
 
-                # ✅ Step1: 更新背景模型
+                # ================================================================
+                # ✅ Step3: Background filtering (with warmup mechanism)
+                # ================================================================
                 self.bgn.BGN_update(data_np)
-                print(f"[BGN] 当前背景簇数量: {len(self.bgn.BGN_cluster_boundary)}")
+                self.bgn_warmup_counter += 1
 
-                # ✅ Step2: 背景滤波
-                filtered_data = self.bgn.BGN_filter(data_np)
-                print(f"[BGN] 输入点数: {data_np.shape[0]}, 滤波后点数: {filtered_data.shape[0]}")
+                # ✅ First N frames: no filtering, use raw data
+                if self.bgn_warmup_counter <= self.bgn_warmup_frames:
+                    filtered_data = data_np
+                    print(f"[BGN] Warmup ({self.bgn_warmup_counter}/{self.bgn_warmup_frames}), using raw point cloud")
+                else:
+                    filtered_data = self.bgn.BGN_filter(data_np)
+                    print(f"[BGN] Raw points: {data_np.shape[0]}, Filtered: {filtered_data.shape[0]}")
+
+                    # ✅ If too few points after filtering, use raw data
+                    if filtered_data.shape[0] < 5:
+                        print(f"[BGN] Warning: Too few filtered points, using raw point cloud")
+                        filtered_data = data_np
+
                 filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-
-                # ✅ 保存滤波后的点云
                 file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
                 filtered_df.to_excel(file_xlsx, index=False)
-                print(f"[Save] 滤波点云已保存 {file_xlsx}")
+                print(f"[Save] Point cloud saved -> {file_xlsx}")
 
-                # ✅ Step3: DBSCAN 聚类 + 防损坏逻辑
+                # ================================================================
+                # ✅ Step4: DBSCAN clustering + empty file protection
+                # ================================================================
                 cluster_path = None
-                if self.cluster_dir:
-                    try:
-                        _, valid_points_list, _, noise = self.dbscan.DBS(filtered_data)
-                        cluster_path = os.path.join(self.cluster_dir, f"cluster_{self.uartCounter}.xlsx")
+                valid_points_list = []
+                try:
+                    _, valid_points_list, _, noise = self.dbscan.DBS(filtered_data)
+                    cluster_path = os.path.join(self.cluster_dir, f"cluster_{self.uartCounter}.xlsx")
 
-                        # ✅ 若无聚类结果，保存空sheet
+                    with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
                         if len(valid_points_list) == 0 and len(noise) == 0:
-                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
-                                pd.DataFrame(columns=['X', 'Y', 'Z', 'Doppler', 'SNR']).to_excel(
-                                    writer, sheet_name='Empty', index=False)
-                            print(f"[DBSCAN] 无聚类结果，保存空文件 {cluster_path}")
+                            pd.DataFrame(columns=['X', 'Y', 'Z', 'Doppler', 'SNR']).to_excel(
+                                writer, sheet_name='Empty', index=False)
+                            print(f"[DBSCAN] No clusters found -> {cluster_path}")
                         else:
-                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
-                                for i, cluster in enumerate(valid_points_list):
-                                    if len(cluster) == 0:
-                                        continue
-                                    df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                    df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
-                                if len(noise) > 0:
-                                    df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                    df_noise.to_excel(writer, sheet_name='Noise', index=False)
-                            print(f"✅ Cluster saved: {cluster_path}")
+                            for i, cluster in enumerate(valid_points_list):
+                                if len(cluster) == 0:
+                                    continue
+                                df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
+                            if len(noise) > 0:
+                                df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
+                                df_noise.to_excel(writer, sheet_name='Noise', index=False)
+                            print(f"[DBSCAN] Cluster results saved -> {cluster_path}")
 
-                    except Exception as e:
-                        print(f"[DBSCAN ERROR] {e}")
+                except Exception as e:
+                    print(f"[DBSCAN ERROR] {e}")
 
-                # ✅ Step4: 通知 GUI
-                notify_new_pointcloud((file_xlsx, cluster_path, filtered_data))
+                # ================================================================
+                # ✅ Step5: Human tracking
+                # ================================================================
+                track_positions = []
+                try:
+                    if len(valid_points_list) > 0:
+                        self.tracker.TRK_update_poss_matrix(valid_points_list)
+                        for person in self.tracker.TRK_people_list:
+                            obj_cp, _, _ = person.get_info()
+                            if obj_cp.size > 0:
+                                track_positions.append(obj_cp.flatten().tolist())
+                except Exception as e:
+                    print(f"[Tracking ERROR] {e}")
 
+                # ================================================================
+                # ✅ Step6: Notify GUI
+                # ================================================================
+                notify_new_pointcloud((file_xlsx, cluster_path, filtered_data, track_positions))
 
         return parseStandardFrame(frameData)
 
-    # ------------------- 单串口模式 -------------------
+    # ------------------- Single COM Port Mode -------------------
     def readAndParseUartSingleCOMPort(self):
-        """单串口读取 + 背景滤波 + DBSCAN 聚类"""
+        """Single COM port mode (similar logic)"""
         if not self.cliCom.isOpen():
             self.cliCom.open()
 
@@ -220,7 +305,7 @@ class uartParser:
         magicByte = self.cliCom.read(1)
         frameData = bytearray()
 
-        # --- 帧头识别 ---
+        # Frame header recognition
         while True:
             if len(magicByte) < 1:
                 magicByte = self.cliCom.read(1)
@@ -236,101 +321,35 @@ class uartParser:
                 index = 0
                 frameData = bytearray()
 
-        # --- 读取帧 ---
+        # Read frame
         frameData += self.cliCom.read(4)
         lengthBytes = self.cliCom.read(4)
         frameData += lengthBytes
         frameLength = int.from_bytes(lengthBytes, 'little') - 16
         frameData += self.cliCom.read(frameLength)
 
-        # --- 解析点云 ---
-        if self.saveBinary == 1:
-            self.binData += frameData
-            self.uartCounter += 1
-
-            outputDict = parseStandardFrame(frameData)
-            frame_df = pd.DataFrame(
-                outputDict["pointCloud"],
-                columns=['X', 'Y', 'Z', 'Doppler', 'SNR', 'Noise', 'Track index']
-            )
-            self.pointCloudCache.append(frame_df)
-
-            if len(self.pointCloudCache) > self.framesPerFile:
-                self.pointCloudCache.pop(0)
-
-            if len(self.pointCloudCache) == self.framesPerFile:
-                if self.first_file:
-                    os.makedirs(self.out_bin_dir, exist_ok=True)
-                    os.makedirs(self.out_xlsx_dir, exist_ok=True)
-                    self.first_file = False
-
-                # 保存 bin 文件
-                file_bin = os.path.join(self.out_bin_dir, f"pHistBytes_{self.uartCounter}.bin")
-                with open(file_bin, 'wb') as bfile:
-                    bfile.write(bytes(self.binData))
-                self.binData = bytearray()
-
-                # 合并帧
-                all_points = pd.concat(self.pointCloudCache, ignore_index=True)
-                data_np = all_points[['X', 'Y', 'Z', 'Doppler', 'SNR']].to_numpy(dtype=np.float32)
-
-                # 背景滤波
-                filtered_data = self.bgn.BGN_filter(data_np)
-                filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-
-                # 保存滤波点云
-                file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
-                filtered_df.to_excel(file_xlsx, index=False)
-
-                # ✅ DBSCAN 聚类 + 空sheet保护
-                cluster_path = None
-                if self.cluster_dir:
-                    try:
-                        _, valid_points_list, _, noise = self.dbscan.DBS(filtered_data)
-                        cluster_path = os.path.join(self.cluster_dir, f"cluster_{self.uartCounter}.xlsx")
-
-                        if len(valid_points_list) == 0 and len(noise) == 0:
-                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
-                                pd.DataFrame(columns=['X', 'Y', 'Z', 'Doppler', 'SNR']).to_excel(
-                                    writer, sheet_name='Empty', index=False)
-                            print(f"[DBSCAN] 无聚类结果，保存空文件 {cluster_path}")
-                        else:
-                            with pd.ExcelWriter(cluster_path, engine="openpyxl") as writer:
-                                for i, cluster in enumerate(valid_points_list):
-                                    if len(cluster) == 0:
-                                        continue
-                                    df_cluster = pd.DataFrame(cluster, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                    df_cluster.to_excel(writer, sheet_name=f'Cluster_{i + 1}', index=False)
-                                if len(noise) > 0:
-                                    df_noise = pd.DataFrame(noise, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
-                                    df_noise.to_excel(writer, sheet_name='Noise', index=False)
-                            print(f"✅ Cluster saved: {cluster_path}")
-
-                    except Exception as e:
-                        print(f"[DBSCAN ERROR] {e}")
-
-                time.sleep(0.1)
-                notify_new_pointcloud((file_xlsx, cluster_path))
-
         return parseStandardFrame(frameData)
 
-    # ------------------- 串口连接 -------------------
+    # ------------------- Serial Port Connection -------------------
     def connectComPorts(self, cliCom, dataCom):
+        """Connect double COM ports"""
         self.cliCom = serial.Serial(cliCom, 115200, parity=serial.PARITY_NONE,
                                     stopbits=serial.STOPBITS_ONE, timeout=0.6)
         self.dataCom = serial.Serial(dataCom, 921600, parity=serial.PARITY_NONE,
                                      stopbits=serial.STOPBITS_ONE, timeout=0.6)
         self.dataCom.reset_output_buffer()
-        print('Connected')
+        print('[Serial] Connected (Double COM port)')
 
     def connectComPort(self, cliCom, cliBaud=115200):
+        """Connect single COM port"""
         self.cliCom = serial.Serial(cliCom, cliBaud, parity=serial.PARITY_NONE,
                                     stopbits=serial.STOPBITS_ONE, timeout=4)
         self.cliCom.reset_output_buffer()
-        print('Connected (one port)')
+        print('[Serial] Connected (Single COM port)')
 
-    # ------------------- 配置下发 -------------------
+    # ------------------- Configuration Sending -------------------
     def sendCfg(self, cfg):
+        """Send configuration to radar"""
         for i, line in enumerate(cfg):
             if line == '\n':
                 cfg.remove(line)
@@ -346,26 +365,34 @@ class uartParser:
             else:
                 self.cliCom.write(line.encode())
 
-            ack = self.cliCom.readline(); print(ack)
-            ack = self.cliCom.readline(); print(ack)
+            ack = self.cliCom.readline()
+            print(f"[Config] {ack.decode('utf-8', errors='ignore').strip()}")
+            ack = self.cliCom.readline()
+            print(f"[Config] {ack.decode('utf-8', errors='ignore').strip()}")
 
             splitLine = line.split()
             if splitLine[0] == "baudRate":
                 try:
                     self.cliCom.baudrate = int(splitLine[1])
+                    print(f"[Config] Baud rate changed to {splitLine[1]}")
                 except:
-                    print("Error - Invalid baud rate")
+                    print("[Config ERROR] Invalid baud rate")
                     sys.exit(1)
 
         time.sleep(0.03)
         self.cliCom.reset_input_buffer()
+        print("[Config] Configuration completed")
 
     def sendLine(self, line):
+        """Send single command line"""
         self.cliCom.write(line.encode())
-        ack = self.cliCom.readline(); print(ack)
-        ack = self.cliCom.readline(); print(ack)
+        ack = self.cliCom.readline()
+        print(f"[Command] {ack.decode('utf-8', errors='ignore').strip()}")
+        ack = self.cliCom.readline()
+        print(f"[Command] {ack.decode('utf-8', errors='ignore').strip()}")
 
 
 def getBit(byte, bitNum):
+    """Get bit value from byte"""
     mask = 1 << bitNum
     return 1 if byte & mask else 0

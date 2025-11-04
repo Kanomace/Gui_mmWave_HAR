@@ -1,4 +1,9 @@
-# gui_main.py
+# gui_main_lite_en.py
+# ================================================================
+# Lite Version: Data Collection + Visualization + Tracking Only
+# Removed: Voxelization, Projection, Behavior Inference
+# Language: Full English
+# ================================================================
 
 import os
 import sys
@@ -11,49 +16,39 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import serial
 import serial.tools.list_ports
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import datetime
+import warnings
 
 from pointcloud_notifier import register_callback
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-
-# Matplotlib for 3D point cloud display
 import matplotlib
+
 matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 
-# Your existing modules (unchanged)
-from voxelization import monitor_folder as voxel_monitor_folder
-from projection import monitor_voxel_folder as projection_monitor_voxel_folder
-from projection import create_single_projection
-from voxelization import process_single_excel_file
-from main import (
-    RealTimeBuffer, load_model,
-    GRID_SIZE, BOUNDARIES, WINDOW_SIZE, SEQ_LEN, BATCH_SIZE,
-)
+# ✅ Suppress all warnings
+warnings.filterwarnings('ignore')
 
-# Notifier for cross-module callbacks (must exist as file pointcloud_notifier.py)
-from pointcloud_notifier import register_callback  # used in main to register callback
+# ✅ Configure Matplotlib with English fonts only
+import matplotlib.font_manager as fm
+
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['axes.unicode_minus'] = False
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 
 def list_serial_ports():
-    """返回可用串口列表"""
+    """Return available serial ports"""
     return [p.device for p in serial.tools.list_ports.comports()]
 
 
 # ----------------- Radar Dumper -----------------
 class RadarToXlsxDumper:
-    """
-    雷达数据采集器：通过 gui_parser.uartParser 读取并保存 .xlsx/.bin
-    （此类保持原有行为，不做可视化职责）
-    """
+    """Radar data collector via gui_parser.uartParser"""
 
     def __init__(self, xlsx_out_dir,
                  device_type="IWR6843",
@@ -80,7 +75,7 @@ class RadarToXlsxDumper:
 
             self.parser = uartParser(
                 type=self.demo_type,
-                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),  # 自动对应 bin 文件夹
+                out_bin_dir=self.xlsx_out_dir.replace("xlsx", "bin"),
                 out_xlsx_dir=self.xlsx_out_dir
             )
             self.parser.setSaveBinary(1)
@@ -98,15 +93,15 @@ class RadarToXlsxDumper:
                 with open(self.cfg_file, "r", encoding="utf-8", errors="ignore") as fh:
                     lines = [ln.strip() for ln in fh if ln.strip()]
                 self.parser.sendCfg(lines)
-                self.log(f"[RadarDumper] Sent cfg: {os.path.basename(self.cfg_file)}")
+                self.log(f"[RadarDumper] Config sent: {os.path.basename(self.cfg_file)}")
 
             self._stop_event.clear()
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
-            self.log("[RadarDumper] started")
+            self.log("[RadarDumper] Started")
 
         except Exception as e:
-            self.log(f"[RadarDumper] start failed: {e}")
+            self.log(f"[RadarDumper] Start failed: {e}")
             raise
 
     def stop(self):
@@ -114,11 +109,15 @@ class RadarToXlsxDumper:
         if self.thread:
             self.thread.join(timeout=1.0)
         try:
-            if self.parser and hasattr(self.parser, "close"):
-                self.parser.close()
+            if self.parser and hasattr(self.parser, 'cliCom'):
+                if hasattr(self.parser.cliCom, 'close'):
+                    self.parser.cliCom.close()
+            if self.parser and hasattr(self.parser, 'dataCom'):
+                if hasattr(self.parser.dataCom, 'close'):
+                    self.parser.dataCom.close()
         except Exception:
             pass
-        self.log("[RadarDumper] stopped")
+        self.log("[RadarDumper] Stopped")
 
     def _run(self):
         last_print = 0
@@ -129,252 +128,51 @@ class RadarToXlsxDumper:
                 elif self.parser.parserType == "SingleCOMPort":
                     _ = self.parser.readAndParseUartSingleCOMPort()
                 else:
-                    self.log("[RadarDumper] unsupported parser type")
+                    self.log("[RadarDumper] Unsupported parser type")
                     break
 
                 if time.time() - last_print > 5:
-                    self.log(f"[RadarDumper] running... (device={self.device_type}, demo={self.demo_type})")
+                    self.log(f"[RadarDumper] Running... (device={self.device_type})")
                     last_print = time.time()
 
             except Exception as e:
-                self.log(f"[RadarDumper] error in loop: {e}")
+                self.log(f"[RadarDumper] Error in loop: {e}")
                 time.sleep(0.1)
 
 
-# ----------------- Realtime Pipeline Controller -----------------
-class RealtimePipelineController:
-    def __init__(self, log_fn, result_fn):
-        self.log = log_fn
-        self.push_result = result_fn
+# ----------------- Lite Controller (No Inference) -----------------
+class LiteController:
+    """Lightweight controller: Manages radar collection only"""
 
-        self.model = None
-        self.device = None
-        self.buffer = None
+    def __init__(self, log_fn):
+        self.log = log_fn
         self.stop_event = threading.Event()
 
-        self.threads = []
-        self.infer_thread = None
-
         self.data_root = ""
+        self.output_root = ""
         self.realtime_xlsx_dir = ""
-        self.realtime_voxel_dir = ""
-        self.realtime_xoz_dir = ""
-        self.realtime_yoz_dir = ""
-        self.realtime_xoy_dir = ""
-        self.output_dir = ""
-        self.realtime_bin_dir = ""  # 新增 bin 文件夹
-
-        self.checkpoint_path = ""
-        self.rope_informer_dir = ""
+        self.realtime_bin_dir = ""
         self.cfg_file = ""
 
-        self.results_acc = []
-
         self.radar_dumper = None
-        self.auto_start_radar = False
         self.radar_device_type = "IWR6843"
         self.cli_com = None
         self.data_com = None
 
-    def set_paths(self, data_root, ckpt_path, rope_dir, cfg_file):
+    def set_paths(self, data_root, cfg_file):
         self.data_root = data_root
-        # 生成带时间戳的输出主文件夹
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_root = os.path.join(data_root, timestamp)
         os.makedirs(self.output_root, exist_ok=True)
 
-        # 所有实时文件夹放在 output_root 下
         self.realtime_xlsx_dir = os.path.join(self.output_root, "xlsx")
         self.realtime_bin_dir = os.path.join(self.output_root, "bin")
-        self.realtime_voxel_dir = os.path.join(self.output_root, "pHistBytes_voxel")
-        self.realtime_xoz_dir = os.path.join(self.output_root, "pHistBytes_voxel_XOZ")
-        self.realtime_yoz_dir = os.path.join(self.output_root, "pHistBytes_voxel_YOZ")
-        self.realtime_xoy_dir = os.path.join(self.output_root, "pHistBytes_voxel_XOY")
-        self.output_dir = os.path.join(self.output_root, "results")
-
-        self.checkpoint_path = ckpt_path
-        self.rope_informer_dir = rope_dir
         self.cfg_file = cfg_file
 
     def _ensure_dirs(self):
-        for d in [
-            self.realtime_xlsx_dir,
-            self.realtime_bin_dir,
-            self.realtime_voxel_dir,
-            self.realtime_xoz_dir,
-            self.realtime_yoz_dir,
-            self.realtime_xoy_dir,
-            self.output_dir,
-        ]:
+        for d in [self.realtime_xlsx_dir, self.realtime_bin_dir]:
             os.makedirs(d, exist_ok=True)
 
-    def _load_model(self):
-        if self.rope_informer_dir and self.rope_informer_dir not in sys.path:
-            sys.path.append(self.rope_informer_dir)
-        import main as main_mod
-        main_mod.CHECKPOINT_PATH = self.checkpoint_path
-        self.log("Loading model...")
-        self.model, self.device = load_model()
-        self.log("Model loaded.")
-
-    def _start_file_watchers(self):
-        def start_voxel_monitor():
-            try:
-                voxel_monitor_folder(
-                    self.realtime_xlsx_dir,
-                    self.realtime_voxel_dir,
-                    GRID_SIZE,
-                    BOUNDARIES
-                )
-            except Exception as e:
-                self.log(f"[Error] voxel monitor: {e}")
-
-        def start_projection_monitor():
-            try:
-                projection_monitor_voxel_folder(
-                    self.realtime_voxel_dir,
-                    self.realtime_yoz_dir,
-                    self.realtime_xoy_dir,
-                    self.realtime_xoz_dir
-                )
-            except Exception as e:
-                self.log(f"[Error] projection monitor: {e}")
-
-        t1 = threading.Thread(target=start_voxel_monitor, daemon=True)
-        t2 = threading.Thread(target=start_projection_monitor, daemon=True)
-        t1.start()
-        t2.start()
-        self.threads.extend([t1, t2])
-        self.log("Started voxel and projection monitors.")
-
-        class ImageFileHandler(FileSystemEventHandler):
-            def __init__(self, buffer, logger):
-                self.buffer = buffer
-                self.logger = logger
-                self.processed_images = set()
-
-            def on_created(self, event):
-                if not event.is_directory and (event.src_path.endswith('.png') or event.src_path.endswith('.jpg')):
-                    if event.src_path in self.processed_images:
-                        return
-                    if "XOZ" in event.src_path:
-                        view = "xoz"
-                    elif "YOZ" in event.src_path:
-                        view = "yoz"
-                    else:
-                        return
-                    last_size = -1
-                    for _ in range(10):
-                        try:
-                            current_size = os.path.getsize(event.src_path)
-                            if current_size == last_size and current_size > 0:
-                                self.buffer.add_image(event.src_path, view)
-                                self.processed_images.add(event.src_path)
-                                self.logger(f"New {view.upper()} image: {os.path.basename(event.src_path)}")
-                                break
-                            last_size = current_size
-                            time.sleep(0.05)
-                        except OSError:
-                            time.sleep(0.05)
-
-        self.image_observers = []
-        for folder in [self.realtime_xoz_dir, self.realtime_yoz_dir]:
-            handler = ImageFileHandler(self.buffer, self.log)
-            obs = Observer()
-            obs.schedule(handler, folder, recursive=False)
-            obs.start()
-            self.image_observers.append(obs)
-            self.log(f"Watching image folder: {folder}")
-
-    def _stop_file_watchers(self):
-        if hasattr(self, "image_observers"):
-            for obs in self.image_observers:
-                obs.stop()
-            for obs in self.image_observers:
-                obs.join()
-        self.log("Stopped image folder observers.")
-
-    def _inference_loop(self):
-        from torch.utils.data import DataLoader
-        import torch
-        from main import RealTimeDataset, id2label, SEQ_LEN, BATCH_SIZE, OUTPUT_DIR
-        import main as main_mod
-        main_mod.OUTPUT_DIR = self.output_dir
-
-        dataset = RealTimeDataset(self.buffer, SEQ_LEN)
-
-        def collate_with_meta(batch):
-            xs, ys, metas = [], [], []
-            for x, y, meta in batch:
-                xs.append(x)
-                ys.append(y)
-                metas.append(meta)
-            xs = torch.stack(xs, dim=0) if xs else torch.zeros(1, SEQ_LEN)
-            ys = torch.stack(ys, dim=0) if ys else torch.tensor([-1])
-            return xs, ys, metas
-
-        softmax = torch.nn.Softmax(dim=-1)
-        results = []
-        last_sample_name = None
-
-        self.log("Realtime inference loop started.")
-        while not self.stop_event.is_set():
-            try:
-                if self.buffer.has_new_data() and len(dataset) > 0:
-                    loader = DataLoader(
-                        dataset,
-                        batch_size=BATCH_SIZE,
-                        shuffle=False,
-                        num_workers=0,
-                        collate_fn=collate_with_meta
-                    )
-
-                    with torch.no_grad():
-                        for x, y, meta in loader:
-                            if self.stop_event.is_set():
-                                break
-
-                            if meta[0]["sample_name"] == last_sample_name:
-                                continue
-
-                            x = x.to(self.device)
-                            logits = self.model(x) if callable(self.model) else self.model.forward(x)
-                            if isinstance(logits, tuple):
-                                logits = logits[0]
-                            probs = softmax(logits)
-                            preds = torch.argmax(probs, dim=-1)
-
-                            pred_label = id2label[int(preds.cpu().numpy()[0])]
-                            confidence = probs.cpu().numpy()[0].max()
-
-                            result = {
-                                "sample_name": meta[0]["sample_name"],
-                                "timestamp": meta[0]["timestamp"],
-                                "pred_label": pred_label,
-                                "confidence": float(confidence),
-                                "xlsx_files": meta[0]["xlsx_files"]
-                            }
-
-                            if result["sample_name"] != "no_data":
-                                results.append(result)
-                                last_sample_name = result["sample_name"]
-
-                                self.log(f"样本: {result['sample_name']} | 行为: {result['pred_label']} | 置信度: {result['confidence']:.4f}")
-                                self.push_result(result)
-
-                                df = pd.DataFrame(results)
-                                csv_path = os.path.join(self.output_dir, "realtime_results.csv")
-                                df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-
-                time.sleep(0.1)
-            except Exception as e:
-                self.log(f"[Error] inference loop: {e}")
-                time.sleep(0.5)
-
-        self.log("Realtime inference loop stopped.")
-
-
-    # ---------------- Radar dumper ----------------
     def start_radar_dumper(self):
         self.radar_dumper = RadarToXlsxDumper(
             self.realtime_xlsx_dir,
@@ -388,62 +186,37 @@ class RealtimePipelineController:
             self.radar_dumper.data_com = self.data_com
 
         self.radar_dumper.start()
-        self.log("[Controller] Radar dumper started.")
+        self.log("[Controller] Radar dumper started")
 
     def stop_radar_dumper(self):
         if self.radar_dumper:
             self.radar_dumper.stop()
             self.radar_dumper = None
-            self.log("[Controller] Radar dumper stopped.")
+            self.log("[Controller] Radar dumper stopped")
 
-
-    # ---------------- Pipeline Control ----------------
     def start(self):
         self._ensure_dirs()
-
-        if not os.path.isfile(self.checkpoint_path):
-            raise ValueError("模型 checkpoint 不存在")
-
-        if self.infer_thread and self.infer_thread.is_alive():
-            self.log("推理已在运行中。")
-            return
-
         self.stop_event.clear()
-        self.buffer = RealTimeBuffer(window_size=WINDOW_SIZE)
-
-        if self.auto_start_radar:
-            self.start_radar_dumper()
-
-        self._load_model()
-        self._start_file_watchers()
-
-        self.infer_thread = threading.Thread(target=self._inference_loop, daemon=True)
-        self.infer_thread.start()
-
-        self.log("Pipeline started.")
+        self.start_radar_dumper()
+        self.log("[System] Lite pipeline started (Collection + Visualization + Tracking)")
 
     def stop(self):
         self.stop_event.set()
-        self._stop_file_watchers()
-        if self.infer_thread:
-            self.infer_thread.join(timeout=2.0)
         try:
             self.stop_radar_dumper()
         except Exception:
             pass
-        self.log("Pipeline stopped.")
+        self.log("[System] Lite pipeline stopped")
 
 
 # ----------------- GUI Application -----------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mmWave HAR 实时推理 - 简易UI")
-        self.geometry("1200x800")
+        self.title("mmWave Real-time Visualization - Lite Mode")
+        self.geometry("1600x900")
 
         self.data_root = tk.StringVar()
-        self.ckpt_path = tk.StringVar()
-        self.rope_dir = tk.StringVar()
         self.cfg_file = tk.StringVar()
         self.radar_enable = tk.BooleanVar(value=True)
         self.radar_device = tk.StringVar(value="IWR6843")
@@ -451,30 +224,46 @@ class App(tk.Tk):
         self.data_com_var = tk.StringVar()
         self.log_queue = queue.Queue()
 
-        # queue 用于跨线程接收 pointcloud_notifier 的通知（线程安全）
-        self.pointcloud_queue = queue.Queue()
+        # Point cloud data queue (thread-safe)
+        self.pointcloud_queue = queue.Queue(maxsize=0)
 
-        self.controller = RealtimePipelineController(
-            log_fn=self._log,
-            result_fn=self._push_result_row
-        )
+        # Trajectory history
+        self.trajectory_history = []
+        self.max_trajectory_points = 100
 
-        # build UI first
+        # Cache Excel data
+        self.cluster_cache = {}
+        self.cache_max_size = 5
+
+        # Frame rate statistics
+        self.frame_count = 0
+        self.fps_start_time = time.time()
+        self.current_fps = 0
+
+        # ✅ Use lightweight controller
+        self.controller = LiteController(log_fn=self._log)
+
         self._build_ui()
-        # load config
         self._load_config()
-        # 定时取出日志显示
-        self.after(100, self._drain_log_queue)
-        register_callback(self._on_new_pointcloud)
-        # 定时处理点云队列（在主线程绘制）
-        self.after(100, self._process_pointcloud_queue)
 
-    # ---------------- UI 构建 ----------------
+        # Scheduled tasks
+        self.after(50, self._drain_log_queue)
+        self.after(50, self._process_pointcloud_queue)
+        self.after(1000, self._update_fps_display)
+
+        # Register point cloud callback
+        try:
+            register_callback(self._on_new_pointcloud)
+            self._log("[Notifier] GUI callback registered")
+        except Exception as e:
+            self._log(f"[Notifier] Registration failed: {e}")
+
+    # ---------------- UI Construction ----------------
     def _build_ui(self):
         pad = {"padx": 6, "pady": 4}
 
-        # -------- 顶部路径和雷达设置 --------
-        frm_top = ttk.LabelFrame(self, text="路径设置")
+        # -------- Top: Path and Radar Settings --------
+        frm_top = ttk.LabelFrame(self, text="Path Settings")
         frm_top.pack(fill="x", **pad)
 
         def add_path_row(parent, label, var, select_dir=True, filetypes=None):
@@ -492,72 +281,82 @@ class App(tk.Tk):
                 if p:
                     var.set(p)
 
-            ttk.Button(row, text="选择", command=choose).pack(side="left")
+            ttk.Button(row, text="Browse", command=choose).pack(side="left")
             return row
 
-        add_path_row(frm_top, "数据根目录", self.data_root, select_dir=True)
-        add_path_row(frm_top, "模型 checkpoint", self.ckpt_path, select_dir=False, filetypes=[("pt 文件", "*.pt")])
-        add_path_row(frm_top, "ROPE 模型目录", self.rope_dir, select_dir=True)
-        add_path_row(frm_top, "雷达配置文件", self.cfg_file, select_dir=False, filetypes=[("cfg 文件", "*.cfg")])
+        add_path_row(frm_top, "Data Root Directory", self.data_root, select_dir=True)
+        add_path_row(frm_top, "Radar Config File", self.cfg_file, select_dir=False, filetypes=[("cfg files", "*.cfg")])
 
-        frm_radar = ttk.LabelFrame(self, text="雷达设置")
+        frm_radar = ttk.LabelFrame(self, text="Radar Settings")
         frm_radar.pack(fill="x", **pad)
-        ttk.Checkbutton(frm_radar, text="启用雷达", variable=self.radar_enable).pack(side="left", **pad)
-        ttk.Label(frm_radar, text="设备型号").pack(side="left")
+        ttk.Checkbutton(frm_radar, text="Enable Radar", variable=self.radar_enable).pack(side="left", **pad)
+        ttk.Label(frm_radar, text="Device Model").pack(side="left")
         ttk.Entry(frm_radar, textvariable=self.radar_device, width=15).pack(side="left", padx=4)
         ttk.Label(frm_radar, text="CLI COM").pack(side="left")
         ttk.Combobox(frm_radar, textvariable=self.cli_com_var, values=list_serial_ports(), width=10).pack(side="left")
         ttk.Label(frm_radar, text="DATA COM").pack(side="left")
         ttk.Combobox(frm_radar, textvariable=self.data_com_var, values=list_serial_ports(), width=10).pack(side="left")
 
+        # ✅ Control buttons + FPS display (All English)
         frm_btn = ttk.Frame(self)
         frm_btn.pack(fill="x", **pad)
-        ttk.Button(frm_btn, text="启动", command=self._on_start).pack(side="left", padx=4)
-        ttk.Button(frm_btn, text="停止", command=self._on_stop).pack(side="left", padx=4)
-        ttk.Button(frm_btn, text="保存配置", command=self._save_config).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="Start", command=self._on_start).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="Stop", command=self._on_stop).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="Save Config", command=self._save_config).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="Clear Trajectory", command=self._clear_trajectory).pack(side="left", padx=4)
 
-        # -------- 主体区域：左日志 + 右点云 --------
+        ttk.Separator(frm_btn, orient='vertical').pack(side="left", fill='y', padx=10)
+        self.fps_label = ttk.Label(frm_btn, text="FPS: 0.0", font=("Arial", 10, "bold"))
+        self.fps_label.pack(side="left", padx=10)
+
+        # -------- Main area: Left log + Center 3D + Right XY trajectory --------
         frm_main = ttk.Frame(self)
         frm_main.pack(fill="both", expand=True, **pad)
 
-        # 左侧：日志和结果
-        frm_left = ttk.Frame(frm_main)
-        frm_left.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        # Left: Log
+        frm_left = ttk.Frame(frm_main, width=400)
+        frm_left.pack(side="left", fill="both", expand=False, padx=4, pady=4)
+        frm_left.pack_propagate(False)
 
-        frm_log = ttk.LabelFrame(frm_left, text="日志输出")
+        frm_log = ttk.LabelFrame(frm_left, text="Log Output")
         frm_log.pack(fill="both", expand=True, **pad)
-        self.txt_log = tk.Text(frm_log, height=12)
+        self.txt_log = tk.Text(frm_log, height=30)
         self.txt_log.pack(fill="both", expand=True)
 
-        frm_res = ttk.LabelFrame(frm_left, text="实时推理结果")
-        frm_res.pack(fill="both", expand=True, **pad)
-        self.tree = ttk.Treeview(frm_res, columns=("sample", "label", "confidence"), show="headings")
-        self.tree.heading("sample", text="样本")
-        self.tree.heading("label", text="行为")
-        self.tree.heading("confidence", text="置信度")
-        self.tree.pack(fill="both", expand=True)
+        # Center: 3D Point Cloud
+        frm_center = ttk.LabelFrame(frm_main, text="3D Point Cloud (X-Y-Z)")
+        frm_center.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
-        # 右侧：点云显示
-        frm_right = ttk.LabelFrame(frm_main, text="点云显示 (X-Y-Z)")
+        fig_3d = Figure(figsize=(6, 6), dpi=80)
+        self.ax_3d = fig_3d.add_subplot(111, projection="3d")
+        self.ax_3d.set_xlabel("X (m)")
+        self.ax_3d.set_ylabel("Y (m)")
+        self.ax_3d.set_zlabel("Z (m)")
+        self.ax_3d.set_xlim(-4, 4)
+        self.ax_3d.set_ylim(0, 8)
+        self.ax_3d.set_zlim(-4, 4)
+        self.canvas_3d = FigureCanvasTkAgg(fig_3d, master=frm_center)
+        self.canvas_3d.get_tk_widget().pack(fill="both", expand=True)
+
+        # Right: XY Plane Trajectory
+        frm_right = ttk.LabelFrame(frm_main, text="XY Trajectory View")
         frm_right.pack(side="right", fill="both", expand=True, padx=4, pady=4)
 
-        # matplotlib 图
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        fig = plt.Figure(figsize=(5, 5))
-        self.ax = fig.add_subplot(111, projection="3d")
-        self.ax.set_xlabel("X (m)")
-        self.ax.set_ylabel("Y (m)")
-        self.ax.set_zlabel("Z (m)")
-        self.canvas = FigureCanvasTkAgg(fig, master=frm_right)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        fig_xy = Figure(figsize=(5, 6), dpi=80)
+        self.ax_xy = fig_xy.add_subplot(111)
+        self.ax_xy.set_xlabel("X (m)")
+        self.ax_xy.set_ylabel("Y (m)")
+        self.ax_xy.set_xlim(-4, 4)
+        self.ax_xy.set_ylim(0, 8)
+        self.ax_xy.grid(True, alpha=0.3)
+        self.ax_xy.set_aspect('equal')
+        self.canvas_xy = FigureCanvasTkAgg(fig_xy, master=frm_right)
+        self.canvas_xy.get_tk_widget().pack(fill="both", expand=True)
 
     # ---------------- Config ----------------
     def _save_config(self):
         cfg = {
             "data_root": self.data_root.get(),
-            "ckpt_path": self.ckpt_path.get(),
-            "rope_dir": self.rope_dir.get(),
             "cfg_file": self.cfg_file.get(),
             "radar_enable": self.radar_enable.get(),
             "radar_device": self.radar_device.get(),
@@ -566,7 +365,7 @@ class App(tk.Tk):
         }
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
-        self._log("[Config] 保存完成")
+        self._log("[Config] Configuration saved")
 
     def _load_config(self):
         if os.path.isfile(CONFIG_PATH):
@@ -574,255 +373,319 @@ class App(tk.Tk):
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 self.data_root.set(cfg.get("data_root", ""))
-                self.ckpt_path.set(cfg.get("ckpt_path", ""))
-                self.rope_dir.set(cfg.get("rope_dir", ""))
                 self.cfg_file.set(cfg.get("cfg_file", ""))
                 self.radar_enable.set(cfg.get("radar_enable", True))
                 self.radar_device.set(cfg.get("radar_device", "IWR6843"))
                 self.cli_com_var.set(cfg.get("cli_com", ""))
                 self.data_com_var.set(cfg.get("data_com", ""))
-                self._log("[Config] 加载完成")
+                self._log("[Config] Configuration loaded")
             except Exception as e:
-                self._log(f"[Config] 加载失败: {e}")
+                self._log(f"[Config] Load failed: {e}")
 
     # ---------------- Events ----------------
     def _on_start(self):
         try:
             self.controller.set_paths(
                 self.data_root.get(),
-                self.ckpt_path.get(),
-                self.rope_dir.get(),
                 self.cfg_file.get()
             )
-            self.controller.auto_start_radar = self.radar_enable.get()
             self.controller.radar_device_type = self.radar_device.get()
             self.controller.cli_com = self.cli_com_var.get()
             self.controller.data_com = self.data_com_var.get()
             self.controller.start()
-            self.status_var.set("状态: 已启动")
+
+            # Reset FPS statistics
+            self.frame_count = 0
+            self.fps_start_time = time.time()
+
+            self._log("[System] System started (Lite Mode)")
         except Exception as e:
-            self._log(f"[Error] 启动失败: {e}")
-            self.status_var.set("状态: 启动失败")
+            self._log(f"[Error] Start failed: {e}")
 
     def _on_stop(self):
         try:
             self.controller.stop()
-            self.status_var.set("状态: 已停止")
+            self._log("[System] System stopped")
         except Exception as e:
-            self._log(f"[Error] 停止失败: {e}")
+            self._log(f"[Error] Stop failed: {e}")
+
+    def _clear_trajectory(self):
+        """Clear trajectory history"""
+        self.trajectory_history.clear()
+        self.cluster_cache.clear()
+        self.ax_xy.clear()
+        self.ax_xy.set_xlabel("X (m)")
+        self.ax_xy.set_ylabel("Y (m)")
+        self.ax_xy.set_xlim(-4, 4)
+        self.ax_xy.set_ylim(0, 8)
+        self.ax_xy.grid(True, alpha=0.3)
+        self.ax_xy.set_aspect('equal')
+        self.canvas_xy.draw_idle()
+        self._log("[Trajectory] Trajectory cleared")
+
+    # ---------------- FPS Display ----------------
+    def _update_fps_display(self):
+        """Update FPS display"""
+        elapsed = time.time() - self.fps_start_time
+        if elapsed > 0:
+            self.current_fps = self.frame_count / elapsed
+            self.fps_label.config(text=f"FPS: {self.current_fps:.1f}")
+        self.after(1000, self._update_fps_display)
 
     # ---------------- Logging ----------------
     def _log(self, msg):
-        # put to queue to avoid threading issues
         self.log_queue.put(msg)
 
     def _drain_log_queue(self):
-        while not self.log_queue.empty():
-            msg = self.log_queue.get_nowait()
-            self.txt_log.insert("end", msg + "\n")
-            self.txt_log.see("end")
-        self.after(100, self._drain_log_queue)
+        """Periodically drain log queue"""
+        count = 0
+        while not self.log_queue.empty() and count < 10:
+            try:
+                msg = self.log_queue.get_nowait()
+                self.txt_log.insert("end", msg + "\n")
+                count += 1
+            except queue.Empty:
+                break
+        self.txt_log.see("end")
+        self.after(50, self._drain_log_queue)
 
-    # ---------------- Result ----------------
-    def _push_result_row(self, result):
-        self.tree.insert("", "end", values=(result["sample_name"], result["pred_label"], f"{result['confidence']:.4f}"))
-
-    # ---------------- Pointcloud queue handling ----------------
-    def _enqueue_pointcloud(self, file_path):
-        """
-        This function is safe to be called from other threads (it's registered as callback).
-        It only enqueues the file path for the main thread to process.
-        """
+    # ---------------- Pointcloud Callback ----------------
+    def _on_new_pointcloud(self, payload):
+        """Callback function (called in worker thread)"""
         try:
-            self.pointcloud_queue.put(file_path)
+            if isinstance(payload, tuple) and len(payload) >= 3:
+                file_path = payload[0]
+                cluster_path = payload[1] if len(payload) > 1 else None
+                filtered_data = payload[2] if len(payload) > 2 else None
+                track_positions = payload[3] if len(payload) > 3 else []
+
+                self.pointcloud_queue.put({
+                    'file_path': file_path,
+                    'cluster_path': cluster_path,
+                    'filtered_data': filtered_data,
+                    'track_positions': track_positions,
+                    'timestamp': time.time()
+                })
+            else:
+                print(f"[PointCloud] Unknown payload format: {type(payload)}")
         except Exception as e:
-            # put best-effort log
-            self._log(f"[PointCloud] enqueue error: {e}")
+            print(f"[PointCloud] Callback error: {e}")
 
     def _process_pointcloud_queue(self):
-        """
-        Called periodically on the main thread to process queued pointcloud file paths.
-        """
+        """Main thread processes point cloud queue"""
         try:
-            while not self.pointcloud_queue.empty():
-                file_path = self.pointcloud_queue.get_nowait()
-                # process and draw
-                self._update_pointcloud_view(file_path)
+            if not self.pointcloud_queue.empty():
+                data = self.pointcloud_queue.get_nowait()
+
+                # Process in background thread
+                threading.Thread(
+                    target=self._process_pointcloud_async,
+                    args=(data,),
+                    daemon=True
+                ).start()
+
+        except queue.Empty:
+            pass
         except Exception as e:
-            self._log(f"[PointCloud] processing error: {e}")
+            self._log(f"[PointCloud] Queue processing error: {e}")
         finally:
-            self.after(100, self._process_pointcloud_queue)
+            self.after(50, self._process_pointcloud_queue)
 
-    def _update_pointcloud_view(self, file_path):
-        """
-        Load the saved xlsx file and draw 3D scatter with SNR color mapping.
-        This runs on the Tk main thread.
-        """
+    def _process_pointcloud_async(self, data):
+        """Background thread: Read Excel"""
         try:
-            if not os.path.isfile(file_path):
-                self._log(f"[PointCloud] 文件不存在: {file_path}")
-                return
+            file_path = data['file_path']
+            cluster_path = data['cluster_path']
+            filtered_data = data['filtered_data']
 
-            df = pd.read_excel(file_path)
-            # look for common column name variants
-            cols = {c.lower(): c for c in df.columns}
-            if not all(k in cols for k in ("x", "y", "z")):
-                self._log(f"[PointCloud] 文件缺少 X/Y/Z 列: {file_path}")
-                return
-
-            xcol = cols["x"]
-            ycol = cols["y"]
-            zcol = cols["z"]
-            # snr optional
-            snr_col = cols.get("snr", None)
-
-            xs = df[xcol].to_numpy(dtype=float)
-            ys = df[ycol].to_numpy(dtype=float)
-            zs = df[zcol].to_numpy(dtype=float)
-
-            # build colors from SNR if present, else use height-based color
-            if snr_col:
-                snr = df[snr_col].to_numpy(dtype=float)
-                # normalize 0..1
-                if np.nanmax(snr) - np.nanmin(snr) > 1e-6:
-                    norm = (snr - np.nanmin(snr)) / (np.nanmax(snr) - np.nanmin(snr))
+            # Prepare cluster data
+            cluster_boxes = []
+            if cluster_path and os.path.isfile(cluster_path):
+                if cluster_path in self.cluster_cache:
+                    cluster_boxes = self.cluster_cache[cluster_path]
                 else:
-                    norm = np.clip(snr, 0, 1)
-                cmap = matplotlib.cm.get_cmap("jet")
-                colors = cmap(norm)
-            else:
-                # fallback: color by z
-                if np.nanmax(zs) - np.nanmin(zs) > 1e-6:
-                    normz = (zs - np.nanmin(zs)) / (np.nanmax(zs) - np.nanmin(zs))
-                else:
-                    normz = np.zeros_like(zs)
-                cmap = matplotlib.cm.get_cmap("viridis")
-                colors = cmap(normz)
+                    try:
+                        xl = pd.ExcelFile(cluster_path)
+                        for sheet_name in xl.sheet_names:
+                            if "Cluster" not in sheet_name or sheet_name == "Empty":
+                                continue
 
-            self.ax.cla()
-            self.ax.scatter(xs, ys, zs, c=colors, s=6)
-            self.ax.set_xlabel('X (m)')
-            self.ax.set_ylabel('Y (m)')
-            self.ax.set_zlabel('Z (m)')
-            self.ax.set_title(os.path.basename(file_path))
-            # optionally adjust limits
-            try:
-                margin = 0.5
-                self.ax.set_xlim(np.nanmin(xs)-margin, np.nanmax(xs)+margin)
-                self.ax.set_ylim(np.nanmin(ys)-margin, np.nanmax(ys)+margin)
-                self.ax.set_zlim(np.nanmin(zs)-margin, np.nanmax(zs)+margin)
-            except Exception:
-                pass
-            self.canvas.draw()
-            self._log(f"[PointCloud] 显示: {os.path.basename(file_path)}")
-        except Exception as e:
-            self._log(f"[PointCloud] 更新失败: {e}")
+                            cdf = xl.parse(sheet_name)
+                            if not {'X', 'Y', 'Z'}.issubset(cdf.columns) or len(cdf) == 0:
+                                continue
 
-    def _on_new_pointcloud(self, payload):
-        """当有新的点云文件保存时（带聚类信息 + 内存数据）"""
-        try:
-            # payload = (file_path, cluster_path, filtered_data)
-            if isinstance(payload, tuple):
-                if len(payload) == 3:
-                    file_path, cluster_path, filtered_data = payload
-                else:
-                    file_path, cluster_path = payload
-                    filtered_data = None
-            else:
-                file_path, cluster_path = payload, None
-                filtered_data = None
+                            box = {
+                                'xmin': cdf['X'].min(),
+                                'xmax': cdf['X'].max(),
+                                'ymin': cdf['Y'].min(),
+                                'ymax': cdf['Y'].max(),
+                                'zmin': cdf['Z'].min(),
+                                'zmax': cdf['Z'].max(),
+                                'label': sheet_name.split("_")[-1]
+                            }
+                            cluster_boxes.append(box)
 
-            if filtered_data is not None:
-                # ✅ 直接使用内存数据绘制（不读Excel）
-                self.after(0, lambda: self._update_pointcloud(None, file_path, cluster_path, filtered_data))
-            else:
-                # 兼容旧方式：从Excel读取
-                if not os.path.isfile(file_path):
-                    self._log(f"[PointCloud] 文件不存在: {file_path}")
-                    return
-                df = pd.read_excel(file_path)
-                self.after(0, lambda: self._update_pointcloud(df, file_path, cluster_path))
+                        self.cluster_cache[cluster_path] = cluster_boxes
+                        if len(self.cluster_cache) > self.cache_max_size:
+                            oldest = list(self.cluster_cache.keys())[0]
+                            del self.cluster_cache[oldest]
+                    except Exception as e:
+                        print(f"[Cluster] Read failed: {e}")
+
+            # Switch back to main thread for drawing
+            self.after(0, lambda: self._update_visualization(
+                file_path, filtered_data, cluster_boxes
+            ))
 
         except Exception as e:
-            self._log(f"[PointCloud] 加载失败: {e}")
+            print(f"[AsyncProcess] Error: {e}")
 
-    def _update_pointcloud(self, df=None, file_path=None, cluster_path=None, filtered_data=None):
-        """
-        如果传入 filtered_data (numpy数组)，直接绘制；
-        否则从 df 中绘制。
-        """
+    def _update_visualization(self, file_path, filtered_data, cluster_boxes):
+        """Main thread: Update visualization"""
         try:
-            self.ax.clear()
+            # ==================== 3D Point Cloud ====================
+            self.ax_3d.clear()
 
-            if filtered_data is not None:
-                # ✅ 内存点云绘制
-                xs, ys, zs = filtered_data[:, 0], filtered_data[:, 1], filtered_data[:, 2]
+            # Draw point cloud
+            if filtered_data is not None and len(filtered_data) > 0:
+                xs = filtered_data[:, 0]
+                ys = filtered_data[:, 1]
+                zs = filtered_data[:, 2]
                 snr = filtered_data[:, 4] if filtered_data.shape[1] >= 5 else np.zeros_like(xs)
 
+                # Color normalization
+                if np.ptp(snr) > 1e-6:
+                    norm_snr = (snr - np.min(snr)) / (np.ptp(snr) + 1e-6)
+                else:
+                    norm_snr = np.zeros_like(snr)
 
-            # 颜色归一化
-            norm_snr = (snr - np.min(snr)) / (np.ptp(snr) + 1e-6)
-            self.ax.scatter(xs, ys, zs, c=norm_snr, cmap='jet', s=8)
+                # ✅ Downsample if too many points
+                if len(xs) > 300:
+                    step = len(xs) // 300
+                    xs, ys, zs, norm_snr = xs[::step], ys[::step], zs[::step], norm_snr[::step]
 
-            # 固定坐标范围
-            self.ax.set_xlim(-4, 4)
-            self.ax.set_ylim(0, 8)
-            self.ax.set_zlim(-4, 4)
-            self.ax.set_box_aspect([1, 1, 1])
-            self.ax.set_xlabel('X (m)')
-            self.ax.set_ylabel('Y (m)')
-            self.ax.set_zlabel('Z (m)')
-            self.ax.set_title(os.path.basename(file_path) if file_path else "Realtime Cloud")
+                self.ax_3d.scatter(xs, ys, zs, c=norm_snr, cmap='jet', s=6, alpha=0.7)
 
-            # ✅ 绘制 DBSCAN 框（保持原逻辑）
-            if cluster_path and os.path.isfile(cluster_path):
-                try:
-                    xl = pd.ExcelFile(cluster_path)
-                    for sheet_name in xl.sheet_names:
-                        if "Cluster" not in sheet_name:
-                            continue
-                        cdf = xl.parse(sheet_name)
-                        if not {'X', 'Y', 'Z'}.issubset(cdf.columns):
-                            continue
+            # Draw cluster boxes
+            for box in cluster_boxes:
+                xmin, xmax = box['xmin'], box['xmax']
+                ymin, ymax = box['ymin'], box['ymax']
+                zmin, zmax = box['zmin'], box['zmax']
 
-                        xmin, xmax = cdf['X'].min(), cdf['X'].max()
-                        ymin, ymax = cdf['Y'].min(), cdf['Y'].max()
-                        zmin, zmax = cdf['Z'].min(), cdf['Z'].max()
-                        x = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
-                        y = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
-                        z = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
-                        edges = [
-                            (0, 1), (1, 2), (2, 3), (3, 0),
-                            (4, 5), (5, 6), (6, 7), (7, 4),
-                            (0, 4), (1, 5), (2, 6), (3, 7)
-                        ]
-                        for e0, e1 in edges:
-                            self.ax.plot([x[e0], x[e1]], [y[e0], y[e1]], [z[e0], z[e1]], color='red', linewidth=1.2)
-                except Exception as e:
-                    self._log(f"[ClusterDraw] 绘制聚类框失败: {e}")
+                cx = (xmin + xmax) / 2
+                cy = (ymin + ymax) / 2
+                cz = (zmin + zmax) / 2
 
-            self.canvas.draw()
-            self._log(f"[PointCloud] 显示: {os.path.basename(file_path) if file_path else '(memory)'}")
+                # Add to trajectory
+                self.trajectory_history.append((cx, cy, time.time()))
+                if len(self.trajectory_history) > self.max_trajectory_points:
+                    self.trajectory_history.pop(0)
+
+                # Draw bounding box
+                x = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
+                y = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
+                z = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+
+                edges = [
+                    (0, 1), (1, 2), (2, 3), (3, 0),
+                    (4, 5), (5, 6), (6, 7), (7, 4),
+                    (0, 4), (1, 5), (2, 6), (3, 7)
+                ]
+
+                for e0, e1 in edges:
+                    self.ax_3d.plot(
+                        [x[e0], x[e1]],
+                        [y[e0], y[e1]],
+                        [z[e0], z[e1]],
+                        color='red', linewidth=1.2
+                    )
+
+                self.ax_3d.text(cx, cy, cz, f'C{box["label"]}',
+                                color='yellow', fontsize=9, weight='bold')
+
+            # Set axes
+            self.ax_3d.set_xlabel('X (m)', fontsize=9)
+            self.ax_3d.set_ylabel('Y (m)', fontsize=9)
+            self.ax_3d.set_zlabel('Z (m)', fontsize=9)
+            self.ax_3d.set_xlim(-4, 4)
+            self.ax_3d.set_ylim(0, 8)
+            self.ax_3d.set_zlim(-4, 4)
+            self.ax_3d.set_box_aspect([1, 1, 1])
+            self.ax_3d.set_title(os.path.basename(file_path) if file_path else "Realtime", fontsize=10)
+
+            self.canvas_3d.draw_idle()
+
+            # ==================== XY Trajectory ====================
+            self._update_xy_trajectory()
+
+            # ✅ Update FPS statistics
+            self.frame_count += 1
 
         except Exception as e:
-            self._log(f"[PointCloudView] Failed to update: {e}")
+            self._log(f"[Visualization] Update failed: {e}")
+
+    def _update_xy_trajectory(self):
+        """Update XY trajectory"""
+        try:
+            self.ax_xy.clear()
+
+            self.ax_xy.set_xlabel("X (m)", fontsize=9)
+            self.ax_xy.set_ylabel("Y (m)", fontsize=9)
+            self.ax_xy.set_xlim(-4, 4)
+            self.ax_xy.set_ylim(0, 8)
+            self.ax_xy.grid(True, alpha=0.3)
+            self.ax_xy.set_aspect('equal')
+
+            if len(self.trajectory_history) == 0:
+                self.ax_xy.set_title("XY Trajectory (No Data)", fontsize=10)
+                self.canvas_xy.draw_idle()
+                return
+
+            xs = [p[0] for p in self.trajectory_history]
+            ys = [p[1] for p in self.trajectory_history]
+            timestamps = [p[2] for p in self.trajectory_history]
+
+            current_time = time.time()
+            alphas = [max(0.1, 1.0 - (current_time - ts) / 30.0) for ts in timestamps]
+
+            # ✅ Downsample trajectory
+            if len(xs) > 50:
+                step = max(1, len(xs) // 50)
+                xs_plot = xs[::step]
+                ys_plot = ys[::step]
+                alphas_plot = alphas[::step]
+            else:
+                xs_plot, ys_plot, alphas_plot = xs, ys, alphas
+
+            # Draw trajectory lines
+            for i in range(len(xs_plot) - 1):
+                self.ax_xy.plot(
+                    xs_plot[i:i + 2], ys_plot[i:i + 2],
+                    color='blue',
+                    alpha=alphas_plot[i],
+                    linewidth=1.5
+                )
+
+            # Draw trajectory points
+            self.ax_xy.scatter(xs_plot, ys_plot, c=alphas_plot, cmap='Blues',
+                               s=20, alpha=0.7, edgecolors='navy', linewidths=0.5)
+
+            # Annotate latest position
+            if len(xs) > 0:
+                self.ax_xy.scatter(xs[-1], ys[-1], c='red', s=80, marker='*',
+                                   edgecolors='darkred', linewidths=1.5, zorder=10)
+                self.ax_xy.text(xs[-1] + 0.2, ys[-1] + 0.2, 'Current',
+                                fontsize=9, color='red', weight='bold')
+
+            self.ax_xy.set_title(f"XY Trajectory ({len(self.trajectory_history)} pts)", fontsize=10)
+
+            self.canvas_xy.draw_idle()
+
+        except Exception as e:
+            self._log(f"[Trajectory] Update failed: {e}")
 
 
 # ----------------- Main Entrypoint -----------------
 if __name__ == "__main__":
-    # create app
     app = App()
-
-    # register the notifier callback to enqueue pointcloud file paths (thread-safe)
-    try:
-        # import here to avoid circular import issues in some environments
-        from pointcloud_notifier import register_callback
-
-        register_callback(self._enqueue_pointcloud)
-        print("[DEBUG] GUI callback registered.")
-        self.after(500, self._process_pointcloud_queue)
-
-    except Exception as e:
-        app._log(f"[Notifier] 注册失败: {e}")
-
     app.mainloop()
