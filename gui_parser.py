@@ -132,7 +132,11 @@ class uartParser:
 
         # ✅ Background filter warmup counter
         self.bgn_warmup_counter = 0
-        self.bgn_warmup_frames = 10  # First 10 frames for building background model
+        self.bgn_warmup_frames = 50  # 🔧 Fixed: Match BGN_deque_length (50 frames)
+
+        # 🔧 Added: Failure counter and diagnostics
+        self.bgn_fail_counter = 0
+        self.bgn_fail_threshold = 3  # Consecutive failures before fallback
 
         # Output paths
         if self.out_xlsx_dir:
@@ -230,12 +234,28 @@ class uartParser:
                     print(f"[BGN] Warmup ({self.bgn_warmup_counter}/{self.bgn_warmup_frames}), using raw point cloud")
                 else:
                     filtered_data = self.bgn.BGN_filter(data_np)
-                    print(f"[BGN] Raw points: {data_np.shape[0]}, Filtered: {filtered_data.shape[0]}")
+                    filter_rate = filtered_data.shape[0] / data_np.shape[0] if data_np.shape[0] > 0 else 0
+                    print(f"[BGN] Raw: {data_np.shape[0]}, Filtered: {filtered_data.shape[0]} ({filter_rate:.1%})")
 
-                    # ✅ If too few points after filtering, use raw data
-                    if filtered_data.shape[0] < 5:
-                        print(f"[BGN] Warning: Too few filtered points, using raw point cloud")
-                        filtered_data = data_np
+                    # 🔧 Improved: Use percentage-based threshold with fault tolerance
+                    min_points = max(5, int(data_np.shape[0] * 0.05))  # At least 5 points or 5% of raw
+                    if filtered_data.shape[0] < min_points:
+                        self.bgn_fail_counter += 1
+                        print(
+                            f"[BGN] ⚠️  Filter failure {self.bgn_fail_counter}/{self.bgn_fail_threshold}: {filtered_data.shape[0]} < {min_points}")
+
+                        if self.bgn_fail_counter >= self.bgn_fail_threshold:
+                            print(f"[BGN] 🔄 Consecutive failures threshold reached, using raw point cloud")
+                            filtered_data = data_np
+                            self.bgn_fail_counter = 0  # Reset counter
+                        else:
+                            # Still use filtered data even if low, unless consecutive failures
+                            pass
+                    else:
+                        # Success, reset failure counter
+                        if self.bgn_fail_counter > 0:
+                            print(f"[BGN] ✓ Filter recovered, resetting failure counter")
+                        self.bgn_fail_counter = 0
 
                 filtered_df = pd.DataFrame(filtered_data, columns=['X', 'Y', 'Z', 'Doppler', 'SNR'])
                 file_xlsx = os.path.join(self.out_xlsx_dir, f"pHistBytes_{self.uartCounter}.xlsx")
