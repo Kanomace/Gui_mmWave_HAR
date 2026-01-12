@@ -23,6 +23,7 @@ import datetime
 import warnings
 from scipy.optimize import linear_sum_assignment
 import numpy as np
+import cv2
 
 from pointcloud_notifier import register_callback
 import matplotlib
@@ -539,6 +540,8 @@ class App(tk.Tk):
                 rgb, depth = self.camera_manager.get_latest_frames()
 
                 if rgb is not None and depth is not None:
+                    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+                    depth = cv2.cvtColor(depth, cv2.COLOR_BGR2RGB)
                     rgb_width = self.rgb_label.winfo_width()
                     rgb_height = self.rgb_label.winfo_height()
                     depth_width = self.depth_label.winfo_width()
