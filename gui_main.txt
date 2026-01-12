@@ -1,8 +1,9 @@
-# gui_main_lite_en.py
+# gui_main_with_camera.py
 # ================================================================
-# Lite Version: Data Collection + Visualization + Tracking Only
-# Removed: Voxelization, Projection, Behavior Inference
-# Language: Full English
+# Modified Version: Replaced log output with camera RGB + Depth display
+# Left panel now shows real-time camera feed instead of text logs
+# Logs are now printed to console using print()
+# Camera uses original color settings (no modifications)
 # ================================================================
 
 import os
@@ -27,6 +28,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
+from PIL import Image, ImageTk
+
+# Import camera module
+from camera import CameraManager
 
 # ✅ Suppress all warnings
 warnings.filterwarnings('ignore')
@@ -140,7 +145,7 @@ class RadarToXlsxDumper:
                 time.sleep(0.1)
 
 
-# ----------------- Lite Controller (No Inference) -----------------
+# ----------------- Lite Controller -----------------
 class LiteController:
     """Lightweight controller: Manages radar collection only"""
 
@@ -209,11 +214,11 @@ class LiteController:
         self.log("[System] Lite pipeline stopped")
 
 
-# ----------------- GUI Application -----------------
+# ----------------- GUI Application with Camera -----------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mmWave Real-time Visualization - Lite Mode")
+        self.title("mmWave Real-time Visualization with Camera Feed")
         self.geometry("1600x900")
 
         self.data_root = tk.StringVar()
@@ -222,7 +227,7 @@ class App(tk.Tk):
         self.radar_device = tk.StringVar(value="IWR6843")
         self.cli_com_var = tk.StringVar()
         self.data_com_var = tk.StringVar()
-        self.log_queue = queue.Queue()
+        self.camera_enable = tk.BooleanVar(value=True)
 
         # Point cloud data queue (thread-safe)
         self.pointcloud_queue = queue.Queue(maxsize=0)
@@ -240,29 +245,34 @@ class App(tk.Tk):
         self.fps_start_time = time.time()
         self.current_fps = 0
 
-        # ✅ Use lightweight controller
-        self.controller = LiteController(log_fn=self._log)
+        # Camera manager (using original settings, no color modification)
+        self.camera_manager = CameraManager(width=640, height=480, fps=30)
+        self.camera_rgb_image = None
+        self.camera_depth_image = None
+
+        # ✅ Use lightweight controller with print for logging
+        self.controller = LiteController(log_fn=print)
 
         self._build_ui()
         self._load_config()
 
         # Scheduled tasks
-        self.after(50, self._drain_log_queue)
         self.after(50, self._process_pointcloud_queue)
+        self.after(30, self._update_camera_display)  # ~30 FPS for camera
         self.after(1000, self._update_fps_display)
 
         # Register point cloud callback
         try:
             register_callback(self._on_new_pointcloud)
-            self._log("[Notifier] GUI callback registered")
+            print("[Notifier] GUI callback registered")
         except Exception as e:
-            self._log(f"[Notifier] Registration failed: {e}")
+            print(f"[Notifier] Registration failed: {e}")
 
     # ---------------- UI Construction ----------------
     def _build_ui(self):
         pad = {"padx": 6, "pady": 4}
 
-        # -------- Top: Path and Radar Settings --------
+        # -------- Top: Path and Settings --------
         frm_top = ttk.LabelFrame(self, text="Path Settings")
         frm_top.pack(fill="x", **pad)
 
@@ -287,17 +297,26 @@ class App(tk.Tk):
         add_path_row(frm_top, "Data Root Directory", self.data_root, select_dir=True)
         add_path_row(frm_top, "Radar Config File", self.cfg_file, select_dir=False, filetypes=[("cfg files", "*.cfg")])
 
-        frm_radar = ttk.LabelFrame(self, text="Radar Settings")
-        frm_radar.pack(fill="x", **pad)
-        ttk.Checkbutton(frm_radar, text="Enable Radar", variable=self.radar_enable).pack(side="left", **pad)
-        ttk.Label(frm_radar, text="Device Model").pack(side="left")
-        ttk.Entry(frm_radar, textvariable=self.radar_device, width=15).pack(side="left", padx=4)
-        ttk.Label(frm_radar, text="CLI COM").pack(side="left")
-        ttk.Combobox(frm_radar, textvariable=self.cli_com_var, values=list_serial_ports(), width=10).pack(side="left")
-        ttk.Label(frm_radar, text="DATA COM").pack(side="left")
-        ttk.Combobox(frm_radar, textvariable=self.data_com_var, values=list_serial_ports(), width=10).pack(side="left")
+        # Radar and Camera Settings
+        frm_devices = ttk.LabelFrame(self, text="Device Settings")
+        frm_devices.pack(fill="x", **pad)
 
-        # ✅ Control buttons + FPS display (All English)
+        # Radar settings
+        ttk.Checkbutton(frm_devices, text="Enable Radar", variable=self.radar_enable).pack(side="left", **pad)
+        ttk.Label(frm_devices, text="Device Model").pack(side="left")
+        ttk.Entry(frm_devices, textvariable=self.radar_device, width=15).pack(side="left", padx=4)
+        ttk.Label(frm_devices, text="CLI COM").pack(side="left")
+        ttk.Combobox(frm_devices, textvariable=self.cli_com_var, values=list_serial_ports(), width=10).pack(side="left")
+        ttk.Label(frm_devices, text="DATA COM").pack(side="left")
+        ttk.Combobox(frm_devices, textvariable=self.data_com_var, values=list_serial_ports(), width=10).pack(
+            side="left")
+
+        ttk.Separator(frm_devices, orient='vertical').pack(side="left", fill='y', padx=10)
+
+        # Camera settings
+        ttk.Checkbutton(frm_devices, text="Enable Camera", variable=self.camera_enable).pack(side="left", **pad)
+
+        # Control buttons + FPS display
         frm_btn = ttk.Frame(self)
         frm_btn.pack(fill="x", **pad)
         ttk.Button(frm_btn, text="Start", command=self._on_start).pack(side="left", padx=4)
@@ -309,19 +328,35 @@ class App(tk.Tk):
         self.fps_label = ttk.Label(frm_btn, text="FPS: 0.0", font=("Arial", 10, "bold"))
         self.fps_label.pack(side="left", padx=10)
 
-        # -------- Main area: Left log + Center 3D + Right XY trajectory --------
+        # -------- Main area: Left Camera + Center 3D + Right XY trajectory --------
         frm_main = ttk.Frame(self)
         frm_main.pack(fill="both", expand=True, **pad)
 
-        # Left: Log
-        frm_left = ttk.Frame(frm_main, width=400)
+        # Left: Camera Feed (replaced log output)
+        frm_left = ttk.LabelFrame(frm_main, text="Camera Feed")
         frm_left.pack(side="left", fill="both", expand=False, padx=4, pady=4)
+
+        # Set minimum width for left panel
+        frm_left.configure(width=400)
         frm_left.pack_propagate(False)
 
-        frm_log = ttk.LabelFrame(frm_left, text="Log Output")
-        frm_log.pack(fill="both", expand=True, **pad)
-        self.txt_log = tk.Text(frm_log, height=30)
-        self.txt_log.pack(fill="both", expand=True)
+        # Camera display with labels
+        camera_container = ttk.Frame(frm_left)
+        camera_container.pack(fill="both", expand=True)
+
+        # RGB section
+        rgb_frame = ttk.LabelFrame(camera_container, text="RGB Image", padding=2)
+        rgb_frame.pack(fill="both", expand=True, pady=2)
+        self.rgb_label = tk.Label(rgb_frame, bg='black', text="Waiting...",
+                                  fg='gray', font=('Arial', 10))
+        self.rgb_label.pack(fill="both", expand=True)
+
+        # Depth section
+        depth_frame = ttk.LabelFrame(camera_container, text="Depth Image", padding=2)
+        depth_frame.pack(fill="both", expand=True, pady=2)
+        self.depth_label = tk.Label(depth_frame, bg='black', text="Waiting...",
+                                    fg='gray', font=('Arial', 10))
+        self.depth_label.pack(fill="both", expand=True)
 
         # Center: 3D Point Cloud
         frm_center = ttk.LabelFrame(frm_main, text="3D Point Cloud (X-Y-Z)")
@@ -353,6 +388,59 @@ class App(tk.Tk):
         self.canvas_xy = FigureCanvasTkAgg(fig_xy, master=frm_right)
         self.canvas_xy.get_tk_widget().pack(fill="both", expand=True)
 
+    # ---------------- Camera Display ----------------
+    def _update_camera_display(self):
+        """Update camera feed display"""
+        try:
+            if self.camera_manager.is_active():
+                rgb, depth = self.camera_manager.get_latest_frames()
+
+                if rgb is not None and depth is not None:
+                    # Get label sizes
+                    rgb_width = self.rgb_label.winfo_width()
+                    rgb_height = self.rgb_label.winfo_height()
+                    depth_width = self.depth_label.winfo_width()
+                    depth_height = self.depth_label.winfo_height()
+
+                    # If window not fully initialized, use default
+                    if rgb_width <= 1:
+                        rgb_width = 380
+                    if rgb_height <= 1:
+                        rgb_height = 300
+                    if depth_width <= 1:
+                        depth_width = 380
+                    if depth_height <= 1:
+                        depth_height = 300
+
+                    # Process RGB image
+                    h, w = rgb.shape[:2]
+                    scale_rgb = min(rgb_width / w, rgb_height / h)
+                    new_w_rgb = int(w * scale_rgb)
+                    new_h_rgb = int(h * scale_rgb)
+                    rgb_resized = Image.fromarray(rgb).resize((new_w_rgb, new_h_rgb), Image.LANCZOS)
+                    rgb_photo = ImageTk.PhotoImage(rgb_resized)
+
+                    # Process Depth image
+                    h, w = depth.shape[:2]
+                    scale_depth = min(depth_width / w, depth_height / h)
+                    new_w_depth = int(w * scale_depth)
+                    new_h_depth = int(h * scale_depth)
+                    depth_resized = Image.fromarray(depth).resize((new_w_depth, new_h_depth), Image.LANCZOS)
+                    depth_photo = ImageTk.PhotoImage(depth_resized)
+
+                    # Update labels
+                    self.rgb_label.configure(image=rgb_photo, text="")
+                    self.rgb_label.image = rgb_photo  # Keep reference
+
+                    self.depth_label.configure(image=depth_photo, text="")
+                    self.depth_label.image = depth_photo  # Keep reference
+
+        except Exception as e:
+            print(f"[Camera Display] Error: {e}")
+
+        finally:
+            self.after(30, self._update_camera_display)  # ~30 FPS
+
     # ---------------- Config ----------------
     def _save_config(self):
         cfg = {
@@ -361,11 +449,12 @@ class App(tk.Tk):
             "radar_enable": self.radar_enable.get(),
             "radar_device": self.radar_device.get(),
             "cli_com": self.cli_com_var.get(),
-            "data_com": self.data_com_var.get()
+            "data_com": self.data_com_var.get(),
+            "camera_enable": self.camera_enable.get()
         }
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
-        self._log("[Config] Configuration saved")
+        print("[Config] Configuration saved")
 
     def _load_config(self):
         if os.path.isfile(CONFIG_PATH):
@@ -378,13 +467,15 @@ class App(tk.Tk):
                 self.radar_device.set(cfg.get("radar_device", "IWR6843"))
                 self.cli_com_var.set(cfg.get("cli_com", ""))
                 self.data_com_var.set(cfg.get("data_com", ""))
-                self._log("[Config] Configuration loaded")
+                self.camera_enable.set(cfg.get("camera_enable", True))
+                print("[Config] Configuration loaded")
             except Exception as e:
-                self._log(f"[Config] Load failed: {e}")
+                print(f"[Config] Load failed: {e}")
 
     # ---------------- Events ----------------
     def _on_start(self):
         try:
+            # Start radar
             self.controller.set_paths(
                 self.data_root.get(),
                 self.cfg_file.get()
@@ -394,20 +485,30 @@ class App(tk.Tk):
             self.controller.data_com = self.data_com_var.get()
             self.controller.start()
 
+            # Start camera
+            if self.camera_enable.get():
+                try:
+                    self.camera_manager.start()
+                    print("[Camera] Camera started successfully")
+                except Exception as e:
+                    print(f"[Camera] Failed to start: {e}")
+
             # Reset FPS statistics
             self.frame_count = 0
             self.fps_start_time = time.time()
 
-            self._log("[System] System started (Lite Mode)")
+            print("[System] System started (Radar + Camera)")
+
         except Exception as e:
-            self._log(f"[Error] Start failed: {e}")
+            print(f"[Error] Start failed: {e}")
 
     def _on_stop(self):
         try:
             self.controller.stop()
-            self._log("[System] System stopped")
+            self.camera_manager.stop()
+            print("[System] System stopped")
         except Exception as e:
-            self._log(f"[Error] Stop failed: {e}")
+            print(f"[Error] Stop failed: {e}")
 
     def _clear_trajectory(self):
         """Clear trajectory history"""
@@ -421,7 +522,7 @@ class App(tk.Tk):
         self.ax_xy.grid(True, alpha=0.3)
         self.ax_xy.set_aspect('equal')
         self.canvas_xy.draw_idle()
-        self._log("[Trajectory] Trajectory cleared")
+        print("[Trajectory] Trajectory cleared")
 
     # ---------------- FPS Display ----------------
     def _update_fps_display(self):
@@ -431,23 +532,6 @@ class App(tk.Tk):
             self.current_fps = self.frame_count / elapsed
             self.fps_label.config(text=f"FPS: {self.current_fps:.1f}")
         self.after(1000, self._update_fps_display)
-
-    # ---------------- Logging ----------------
-    def _log(self, msg):
-        self.log_queue.put(msg)
-
-    def _drain_log_queue(self):
-        """Periodically drain log queue"""
-        count = 0
-        while not self.log_queue.empty() and count < 10:
-            try:
-                msg = self.log_queue.get_nowait()
-                self.txt_log.insert("end", msg + "\n")
-                count += 1
-            except queue.Empty:
-                break
-        self.txt_log.see("end")
-        self.after(50, self._drain_log_queue)
 
     # ---------------- Pointcloud Callback ----------------
     def _on_new_pointcloud(self, payload):
@@ -487,7 +571,7 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         except Exception as e:
-            self._log(f"[PointCloud] Queue processing error: {e}")
+            print(f"[PointCloud] Queue processing error: {e}")
         finally:
             self.after(50, self._process_pointcloud_queue)
 
@@ -559,7 +643,7 @@ class App(tk.Tk):
                 else:
                     norm_snr = np.zeros_like(snr)
 
-                # ✅ Downsample if too many points
+                # Downsample if too many points
                 if len(xs) > 300:
                     step = len(xs) // 300
                     xs, ys, zs, norm_snr = xs[::step], ys[::step], zs[::step], norm_snr[::step]
@@ -618,11 +702,11 @@ class App(tk.Tk):
             # ==================== XY Trajectory ====================
             self._update_xy_trajectory()
 
-            # ✅ Update FPS statistics
+            # Update FPS statistics
             self.frame_count += 1
 
         except Exception as e:
-            self._log(f"[Visualization] Update failed: {e}")
+            print(f"[Visualization] Update failed: {e}")
 
     def _update_xy_trajectory(self):
         """Update XY trajectory"""
@@ -648,7 +732,7 @@ class App(tk.Tk):
             current_time = time.time()
             alphas = [max(0.1, 1.0 - (current_time - ts) / 30.0) for ts in timestamps]
 
-            # ✅ Downsample trajectory
+            # Downsample trajectory
             if len(xs) > 50:
                 step = max(1, len(xs) // 50)
                 xs_plot = xs[::step]
@@ -682,10 +766,22 @@ class App(tk.Tk):
             self.canvas_xy.draw_idle()
 
         except Exception as e:
-            self._log(f"[Trajectory] Update failed: {e}")
+            print(f"[Trajectory] Update failed: {e}")
+
+    def on_closing(self):
+        """Handle window close event"""
+        print("[System] Shutting down...")
+        try:
+            self.controller.stop()
+            self.camera_manager.stop()
+        except Exception as e:
+            print(f"[Shutdown] Error: {e}")
+        finally:
+            self.destroy()
 
 
 # ----------------- Main Entrypoint -----------------
 if __name__ == "__main__":
     app = App()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
